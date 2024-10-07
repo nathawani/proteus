@@ -21,7 +21,7 @@ Heterogeneous Poisson's equation, -div(a(x)u) = f(x), on unit domain [0,1]x[0,1]
 #space dimension
 opts = Context.Options([
     ("genMesh", True, "Generate mesh on the fly, otherwise mesh files must be written prior to job"),
-    ("Refinement", 0, "Refine the mesh this many times"),
+    ("Refinement", 1, "Refine the mesh this many times"),
 ])
 
 name = "poisson_"+str(opts.Refinement)
@@ -45,7 +45,7 @@ hull_center = (0.5*hull_length,
 
 nLevels = 1
 
-he = L[0]/10.0 * 0.5**opts.Refinement
+he =  L[0] / ( ( 20 * 1.26**opts.Refinement) )
 #he = hull_draft/1.0
 #he = hull_draft/6.0
 genMesh=opts.genMesh
