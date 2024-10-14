@@ -13,10 +13,10 @@ import os
 # *************************** #
 opts= Context.Options([
     ('ns_model',1,"ns_model = {rans2p,rans3p}"),
-    ("final_time",0.10,"Final time for simulation"),
+    ("final_time",0.05,"Final time for simulation"),
     ("dt_output",0.0001,"Time interval to output solution"),
-    ("cfl",0.1,"Desired CFL restriction"),
-    ("refinement",1,"level of refinement"),
+    ("cfl",0.2,"Desired CFL restriction"),
+    ("refinement",16,"level of refinement"),
     ("he",1E-3,"he value"),
     ("ARTIFICIAL_VISCOSITY",3,"artificial viscosity"),
     ("u0", 0.0021, "Inlet velocity of the droplet"),
@@ -38,7 +38,7 @@ structured=False
 nd=2
 he=opts.he #Used if unstructured. Goal: he=0.0025=2.5E-3
 refinement=opts.refinement #Used if structured. Goal: 64
-L=(0.02,0.05)
+L=(0.01,0.02)
 u0=opts.u0
 h0=opts.h0
 if useHex:
@@ -47,8 +47,8 @@ else:
     boundaries = ['bottom', 'right', 'top', 'left', 'front', 'back']
     boundaryTags = dict([(key, i + 1) for (i, key) in enumerate(boundaries)])
     if structured:
-        nnx = 32 * 2** refinement #he~0.0039
-        nny = nnx
+        nnx = 4 * refinement #he~0.0039
+        nny = nnx / 2.0
         nnz = None
         triangleFlag=1
         domain = Domain.RectangularDomain(L)
@@ -73,7 +73,7 @@ else:
                         boundaryTags['right'],
                         boundaryTags['top'],
                         boundaryTags['left']]
-        regions = [[0.024, 0.012]]
+        regions = [[0.02, 0.01]]
         regionFlags = [1]
         domain = Domain.PlanarStraightLineGraphDomain(vertices=vertices,
                                                       vertexFlags=vertexFlags,
@@ -83,14 +83,14 @@ else:
                                                       regionFlags=regionFlags)
         #go ahead and add a boundary tags member
         domain.boundaryTags = boundaryTags
-        # domain.polyfile=os.path.dirname(os.path.abspath(__file__))+"/"+"gravityDroplet"
-        domain.writePoly("gravityDroplet")
+        domain.polyfile=os.path.dirname(os.path.abspath(__file__))+"/"+"gravityDroplet"
+        # domain.writePoly("gravityDroplet")
         #domain.MeshOptions.triangleOptions = "VApq30Dena%8.8f" % ((he**2)/2.0,)
         domain.MeshOptions.triangleOptions = "VApq30Dena%8.8f" % ((he ** 2) / 2.0,)
         domain.MeshOptions.he = opts.he
-        domain.MeshOptions.triangleFlag=0
-        domain.MeshOptions.genMesh = True
-        # logEvent("""Mesh generated using: triangle -%s %s""" % (domain.MeshOptions.triangleOptions, domain.polyfile + ".poly"))
+        domain.MeshOptions.triangleFlag = 0
+        domain.MeshOptions.genMesh = False
+        logEvent("""Mesh generated using: triangle -%s %s""" % (domain.MeshOptions.triangleOptions, domain.polyfile + ".poly"))
 
 # ****************************** #
 # ***** INITIAL CONDITIONS ***** #
@@ -155,7 +155,7 @@ def pressure_increment_AFBC(x,flag):
     if not (flag == boundaryTags['top']):
         return lambda x,t: 0.0
     elif x[0]>=L[0]/2.-h0 and x[0]<=L[0]/2.+h0:
-        return lambda x,t: -1.0
+        return lambda x,t: -0.20
     #return lambda x,t: 100*(x[0]-0.45)*(x[0]-0.55)*1/(0.55*0.45) # -1.0
 
 # NOTE: recall that D.BCs are set strongly so I want to kill the advective boundary integral
@@ -252,6 +252,7 @@ m['flow'].p.coefficients.forceStrongDirichlet = True
 m['flow'].p.coefficients.forceStrongDirichlet = True
 m['flow'].p.coefficients.ARTIFICIAL_VISCOSITY = opts.ARTIFICIAL_VISCOSITY
 m['flow'].p.coefficients.epsFact_density = 3.
+m['flow'].p.coefficients.eb_penalty_constant = 1e6
 m['flow'].n.ShockCapturingOptions.shockCapturingFactor = 0.5
 
 myTpFlowProblem.outputStepping.systemStepExact = True
