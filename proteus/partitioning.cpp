@@ -1678,8 +1678,9 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
                          nodeNeighbors_subdomain,
                          weights_subdomain,
                          &petscAdjacency);CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
-  const double max_rss_gb(memHardLimit/1024.0);
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating MPIAdj");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //const double max_rss_gb(0.75*3.25);//half max mem per  core  on topaz
+  const double max_rss_gb(10.0);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating MPIAdj");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   MatPartitioning petscPartition;
   ierr = MatPartitioningCreate(PROTEUS_COMM_WORLD,&petscPartition);CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   ierr = MatPartitioningSetAdjacency(petscPartition,petscAdjacency);CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
@@ -1690,7 +1691,7 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
   IS nodePartitioningIS_new;
   ierr = MatPartitioningApply(petscPartition,&nodePartitioningIS_new);CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   ierr = MatPartitioningDestroy(&petscPartition);CHKERRABORT(PROTEUS_COMM_WORLD, ierr); //gets petscAdjacency too I believe
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done applying partition");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done applying partition");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
 
   //determine the number of nodes per subdomain in new partitioning
   valarray<int> nNodes_subdomain_new(size);
@@ -1822,7 +1823,7 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
   //   the locally owned nodes. Assign processor ownership of elements
   //
   PetscLogEventEnd(receive_element_mask_event,0,0,0,0);
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with masks");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with masks");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   int build_subdomains_reread_elements_event;
   PetscLogEventRegister("Reread eles",0,&build_subdomains_reread_elements_event);
   PetscLogEventBegin(build_subdomains_reread_elements_event,0,0,0,0);
@@ -2019,8 +2020,7 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
   int build_subdomains_send_marked_elements_event;
   PetscLogEventRegister("Mark/send eles",0,&build_subdomains_send_marked_elements_event);
   PetscLogEventBegin(build_subdomains_send_marked_elements_event,0,0,0,0);
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done marking elements");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
-  //cek todo: fix PETsc and memory log messages
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done marking elements");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //
   //done with the element file
   //
@@ -2210,7 +2210,7 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
     ierr=ISDestroy(&elementNumberingIS_subdomain_new2old);CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   }
   PetscLogEventEnd(build_subdomains_global_numbering_elements_event,0,0,0,0);
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating element numbering new2old/old2new");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating element numbering new2old/old2new");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   int build_subdomains_faces_event;
   PetscLogEventRegister("Subd faces",0,&build_subdomains_faces_event);
   PetscLogEventBegin(build_subdomains_faces_event,0,0,0,0);
@@ -2332,7 +2332,7 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
     }
   //done reading element boundaries
   elementBoundaryFile.close();
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading element boundaries");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading element boundaries");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   int nElementBoundaries_owned_subdomain=elementBoundaries_subdomain_owned.size(),
     nElementBoundaries_owned_new=0;
   MPI_Allreduce(&nElementBoundaries_owned_subdomain,&nElementBoundaries_owned_new,1,MPI_INT,MPI_SUM,PROTEUS_COMM_WORLD);
@@ -2474,38 +2474,13 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
     }
   IS elementBoundaryNumberingIS_subdomain_new2old;
   ISCreateGeneral(PROTEUS_COMM_WORLD,elementBoundaries_subdomain_owned.size(),&elementBoundaryNumbering_new2old[0],PETSC_COPY_VALUES,&elementBoundaryNumberingIS_subdomain_new2old);
-  if (test)
-  {
-    IS elementBoundaryNumberingIS_global_new2old;
-    const PetscInt *elementBoundaryNumbering_global_new2old;
-    valarray<int> elementBoundaryNumbering_global_old2new(nElementBoundaries_global);
-    ISAllGather(elementBoundaryNumberingIS_subdomain_new2old,&elementBoundaryNumberingIS_global_new2old);
-    elementBoundaryNumbering_global_old2new.resize(newMesh.nElementBoundaries_global);
-    ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Allocating elementBoudnary old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
-    ISGetIndices(elementBoundaryNumberingIS_global_new2old,&elementBoundaryNumbering_global_new2old);
-    for (int i=0;i<nElementBoundaries_global;i++)
-    {
-      elementBoundaryNumbering_global_old2new[elementBoundaryNumbering_global_new2old[i]]=i;
-    }
-    
-    herr_t status;
-    valarray<int> elementBoundaryNumbering_old2new_read(nElementBoundaries_global);
-    eb_old2new_dataset_id = H5Dopen1(file_id, "/elementBoundaryNumbering_old2new");
-    status = H5Dread(eb_old2new_dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT,
-                     &elementBoundaryNumbering_old2new_read[0]);
-    status = H5Dclose(eb_old2new_dataset_id);
-    for (int i=0;i<nElementBoundaries_global;i++)
-      assert(elementBoundaryNumbering_global_old2new[i] == elementBoundaryNumbering_old2new_read[i]);
-    std::cout<<"==================out of core old2new elementBoundaries is correct!===================="<<std::endl;
-    hid_t eb_new2old_dataset_id = H5Dopen1(file_id, "/elementBoundaryNumbering_new2old");
-    valarray<int> elementBoundaryNumbering_new2old_read(nElementBoundaries_global);
-    status = H5Dread(eb_new2old_dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT,
-                     &elementBoundaryNumbering_new2old_read[0]);
-    status = H5Dclose(eb_new2old_dataset_id);
-    for (int i=0;i<nElementBoundaries_global;i++)
-      assert(elementBoundaryNumbering_global_new2old[i] == elementBoundaryNumbering_new2old_read[i]);
-    std::cout<<"==================out of core new2old elementBoundaries is correct!===================="<<std::endl;
-    for (int i=0;i<elementBoundaries_subdomain.size();i++)
+  IS elementBoundaryNumberingIS_global_new2old;
+  ISAllGather(elementBoundaryNumberingIS_subdomain_new2old,&elementBoundaryNumberingIS_global_new2old);
+  const PetscInt *elementBoundaryNumbering_global_new2old;
+  valarray<int> elementBoundaryNumbering_global_old2new(newMesh.nElementBoundaries_global);
+  ISGetIndices(elementBoundaryNumberingIS_global_new2old,&elementBoundaryNumbering_global_new2old);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Allocating elementBoudnary old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  for (int ebN=0;ebN<newMesh.nElementBoundaries_global;ebN++)
     {
       int ebN = old_elementBoundary_indices_subdomain[i];
       assert(elementBoundaryNumbering_global_old2new[ebN] == elementBoundaryNumbering_old2new_subdomain_map[ebN]);
@@ -2522,7 +2497,7 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
     ierr=ISDestroy(&elementBoundaryNumberingIS_global_new2old);CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   } 
   PetscLogEventEnd(build_subdomains_faces_event,0,0,0,0);
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating elementBoudnary old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating elementBoudnary old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   int build_subdomains_edges_event;
   PetscLogEventRegister("Subd edges",0,&build_subdomains_edges_event);
   PetscLogEventBegin(build_subdomains_edges_event,0,0,0,0);
@@ -2617,7 +2592,7 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
     nEdges_owned_new=0;
   MPI_Allreduce(&nEdges_owned_subdomain,&nEdges_owned_new,1,MPI_INT,MPI_SUM,PROTEUS_COMM_WORLD);
   assert(nEdges_owned_new == nEdges_global);
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading edges");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading edges");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //done with edge file
   //
   //just as with faces, we need to add edges along outer boundaries of star
@@ -2687,134 +2662,23 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
   for (int edN=0;edN<int(edges_subdomain_owned.size());edN++,edN_ownedp++)
     {
       edgeNumbering_new2old[edN] = *edN_ownedp;
-      edgeNumbering_old2new_map[*edN_ownedp] = edN+edgeOffsets_new[rank];
     }
-  //
-  //write this subdomain to the mapping file
-  //
-  hsize_t ed_dims[]={nEdges_global};
-  hid_t ed_new2old_filespace_id = H5Screate_simple(ARRAY_RANK, ed_dims, NULL);
-  hid_t ed_new2old_dataset_id = H5Dcreate(file_id, "edgeNumbering_new2old", H5T_NATIVE_INT, 
-                                          ed_new2old_filespace_id,
-                                          H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-  hsize_t ed_count[]={nEdges_subdomain_new[rank]};
-  hsize_t ed_offset[]={edgeOffsets_new[rank]};
-  hid_t ed_new2old_memspace_id = H5Screate_simple(ARRAY_RANK, ed_count, NULL);
-  H5Sselect_hyperslab(ed_new2old_filespace_id, H5S_SELECT_SET, ed_offset, NULL, ed_count, NULL);
-  hid_t ed_new2old_plist_id = H5Pcreate(H5P_DATASET_XFER);
-  H5Pset_dxpl_mpio(ed_new2old_plist_id, H5FD_MPIO_COLLECTIVE);
-  status = H5Dwrite(ed_new2old_dataset_id, H5T_NATIVE_INT, 
-                    ed_new2old_memspace_id, ed_new2old_filespace_id,
-                    ed_new2old_plist_id, &edgeNumbering_new2old[0]);
-  H5Pclose(ed_new2old_plist_id);
-  H5Sclose(ed_new2old_memspace_id);
-  H5Sclose(ed_new2old_filespace_id);
-  H5Dclose(ed_new2old_dataset_id);
-  //do old2new map too, can't use hyperslab
-  valarray<hsize_t> old_edge_indices(nEdges_subdomain_new[rank]);
-  valarray<int> new_edge_indices(nEdges_subdomain_new[rank]);
-  for (int i=0;i<nEdges_subdomain_new[rank];i++)
+  IS edgeNumberingIS_subdomain_new2old;
+  ISCreateGeneral(PROTEUS_COMM_WORLD,edges_subdomain_owned.size(),&edgeNumbering_new2old[0],PETSC_COPY_VALUES,&edgeNumberingIS_subdomain_new2old);
+  IS edgeNumberingIS_global_new2old;
+  ISAllGather(edgeNumberingIS_subdomain_new2old,&edgeNumberingIS_global_new2old);
+  const PetscInt *edgeNumbering_global_new2old;
+  valarray<int> edgeNumbering_global_old2new(newMesh.nEdges_global);
+  ISGetIndices(edgeNumberingIS_global_new2old,&edgeNumbering_global_new2old);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Setting edgeNumering old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  for (int edN=0;edN<newMesh.nEdges_global;edN++)
     {
-      old_edge_indices[i] = edgeNumbering_new2old[i];
-      new_edge_indices[i] = edgeOffsets_new[rank]+i;
+      edgeNumbering_global_old2new[edgeNumbering_global_new2old[edN]] = edN;
     }
-  hid_t ed_old2new_filespace_id = H5Screate_simple(ARRAY_RANK, ed_dims, NULL);
-  hid_t ed_old2new_dataspace_id = H5Dcreate(file_id, "edgeNumbering_old2new", H5T_NATIVE_INT, 
-                                            ed_old2new_filespace_id,
-                                            H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
-  hid_t ed_old2new_memspace_id = H5Screate_simple(ARRAY_RANK, ed_count, NULL);
-  ed_old2new_filespace_id = H5Dget_space(ed_old2new_dataspace_id);
-  status = H5Sselect_elements(ed_old2new_filespace_id, H5S_SELECT_SET, 
-                              nEdges_subdomain_new[rank], &old_edge_indices[0]);
-  hid_t ed_old2new_plist_id = H5Pcreate(H5P_DATASET_XFER);
-  H5Pset_dxpl_mpio(ed_old2new_plist_id, H5FD_MPIO_COLLECTIVE);
-  status = H5Dwrite(ed_old2new_dataspace_id, H5T_NATIVE_INT, 
-                    ed_old2new_memspace_id, ed_old2new_filespace_id, 
-                    ed_old2new_plist_id, &new_edge_indices[0]);
-  H5Pclose(ed_old2new_plist_id);
-  H5Sclose(ed_old2new_memspace_id);
-  //leave dataset and filespace open for next block
-  //
-  //now get maps for all the edges on the subdomain, not just owned
-  valarray<hsize_t> old_edge_indices_subdomain(edgeNodesMap.size());
-  valarray<int> new_edge_indices_subdomain(edgeNodesMap.size());
-  int edN_old_subdomain = 0;
-  for (auto it = edgeNodesMap.begin(); it != edgeNodesMap.end(); it++, edN_old_subdomain++)
-    {
-      old_edge_indices_subdomain[edN_old_subdomain] = it->first;
-    }
-  status = H5Sselect_elements(ed_old2new_filespace_id, H5S_SELECT_SET, 
-                              edgeNodesMap.size(), &old_edge_indices_subdomain[0]);
-  hsize_t ed_subdomain_count[]={edgeNodesMap.size()};
-  hid_t ed_old2new_subdomain_memspace_id = H5Screate_simple(ARRAY_RANK, ed_subdomain_count, NULL);
-  hid_t ed_old2new_subdomain_plist_id = H5Pcreate(H5P_DATASET_XFER);
-  H5Pset_dxpl_mpio(ed_old2new_subdomain_plist_id, H5FD_MPIO_INDEPENDENT);
-  status = H5Dread(ed_old2new_dataspace_id, H5T_NATIVE_INT, ed_old2new_subdomain_memspace_id, 
-                   ed_old2new_filespace_id, 
-                   ed_old2new_subdomain_plist_id, &new_edge_indices_subdomain[0]);
-  H5Pclose(ed_old2new_subdomain_plist_id);
-  H5Sclose(ed_old2new_subdomain_memspace_id);
-  H5Sclose(ed_old2new_filespace_id);
-  H5Dclose(ed_old2new_dataspace_id);
-
-  map<int,int> edgeNumbering_old2new_subdomain_map;
-  map<int,int> edgeNumbering_new2old_subdomain_map;
-  for (int i=0;i<edgeNodesMap.size();i++)
-    {
-      edgeNumbering_old2new_subdomain_map[old_edge_indices_subdomain[i]] = new_edge_indices_subdomain[i];
-      edgeNumbering_new2old_subdomain_map[new_edge_indices_subdomain[i]] = old_edge_indices_subdomain[i];
-    }
-  if (test)
-  {
-    IS edgeNumberingIS_subdomain_new2old;
-    ISCreateGeneral(PROTEUS_COMM_WORLD,edges_subdomain_owned.size(),&edgeNumbering_new2old[0],PETSC_COPY_VALUES,&edgeNumberingIS_subdomain_new2old);
-    IS edgeNumberingIS_global_new2old;
-    ISAllGather(edgeNumberingIS_subdomain_new2old,&edgeNumberingIS_global_new2old);
-    const PetscInt *edgeNumbering_global_new2old;
-    ISGetIndices(edgeNumberingIS_global_new2old,&edgeNumbering_global_new2old);
-    valarray<int> edgeNumbering_global_old2new(newMesh.nEdges_global);
-    ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Setting edgeNumering old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
-    for (int edN=0;edN<newMesh.nEdges_global;edN++)
-      {
-        edgeNumbering_global_old2new[edgeNumbering_global_new2old[edN]] = edN;
-      }
-
-    herr_t status;
-    valarray<int> edgeNumbering_old2new_read(nEdges_global);
-    hid_t ed_old2new_dataset_id = H5Dopen1(file_id, "/edgeNumbering_old2new");
-    status = H5Dread(ed_old2new_dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT,
-                     &edgeNumbering_old2new_read[0]);
-    status = H5Dclose(ed_old2new_dataset_id);
-    for (int i=0;i<nEdges_global;i++)
-      assert(edgeNumbering_global_old2new[i] == edgeNumbering_old2new_read[i]);
-    std::cout<<"==================out of core old2new edges is correct!===================="<<std::endl;
-    hid_t ed_new2old_dataset_id = H5Dopen1(file_id, "/edgeNumbering_new2old");
-    valarray<int> edgeNumbering_new2old_read(nEdges_global);
-    status = H5Dread(ed_new2old_dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT,
-                     &edgeNumbering_new2old_read[0]);
-    status = H5Dclose(ed_new2old_dataset_id);
-    for (int i=0;i<nEdges_global;i++)
-      assert(edgeNumbering_global_new2old[i] == edgeNumbering_new2old_read[i]);
-    std::cout<<"==================out of core new2old edges is correct!===================="<<std::endl;
-
-    for (auto it = edgeNodesMap.begin(); it != edgeNodesMap.end(); ++it)
-    {
-      assert(edgeNumbering_global_old2new[it->first] == edgeNumbering_old2new_subdomain_map[it->first]);
-    }
-    std::cout<<"==================out of core edgeNumbering old2new subdomain is correct!===================="<<std::endl;
-    for (int i = 0; i < edgeNodesMap.size(); i++)
-    {
-      int edN = new_edge_indices_subdomain[i];
-      assert(edgeNumbering_global_new2old[edN] == edgeNumbering_new2old_subdomain_map[edN]);
-    }
-    std::cout<<"==================out of core edgeNumbering new2old subdomain is correct!===================="<<std::endl;
-    ISRestoreIndices(edgeNumberingIS_global_new2old,&edgeNumbering_global_new2old);
-    ierr=ISDestroy(&edgeNumberingIS_subdomain_new2old);CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
-    ierr=ISDestroy(&edgeNumberingIS_global_new2old);CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
-  }
-  //done with mappings file
-  H5Fclose(file_id);
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating edgeNumering old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  ISRestoreIndices(edgeNumberingIS_global_new2old,&edgeNumbering_global_new2old);
+  ISDestroy(&edgeNumberingIS_subdomain_new2old);
+  ISDestroy(&edgeNumberingIS_global_new2old);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating edgeNumering old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //
   //6. Figure out what is in the node stars but not locally owned, create ghost information
   //
@@ -2951,7 +2815,7 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
     }//end iv
   vertexFile.close();
   //done with vertex file (and all file reads at this point)
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading vertices");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading vertices");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
 
   newMesh.subdomainp->elementNodesArray = new int[newMesh.subdomainp->nElements_global*newMesh.subdomainp->nNodes_element];
   newMesh.subdomainp->elementMaterialTypes = new int[newMesh.subdomainp->nElements_global];
@@ -3108,7 +2972,8 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
               }
           }
     }
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with material types");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  elementBoundaryNumbering_global_old2new.resize(0);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with material types");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   PetscLogEventEnd(build_subdomains_renumber_event,0,0,0,0);
   int build_subdomains_cleanup_event;
   PetscLogEventRegister("Cleanup",0,&build_subdomains_cleanup_event);
@@ -3159,7 +3024,7 @@ int partitionNodesFromTetgenFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char
   PetscLogEventEnd(build_subdomains_cleanup_event,0,0,0,0);
   PetscLogStagePop();
   PetscLogView(PETSC_VIEWER_STDOUT_WORLD);
-  ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with partitioning!");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with partitioning!");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   return 0;
 }
 int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const char* filebase, int indexBase, Mesh& newMesh, int nNodes_overlap)
@@ -3387,6 +3252,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   //const double max_rss_gb(0.75*3.25);//half max mem per  core  on topaz
   const double max_rss_gb(10.0);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating MPIAdj");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating MPIAdj");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   MatPartitioning petscPartition;
   ierr = MatPartitioningCreate(PROTEUS_COMM_WORLD,&petscPartition);CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   ierr = MatPartitioningSetAdjacency(petscPartition,petscAdjacency);CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
@@ -3397,6 +3263,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   IS nodePartitioningIS_new;
   ierr = MatPartitioningApply(petscPartition,&nodePartitioningIS_new);CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   ierr = MatPartitioningDestroy(&petscPartition);CHKERRABORT(PROTEUS_COMM_WORLD, ierr); //gets petscAdjacency too I believe
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done applying partition");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done applying partition");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
 
   //determine the number of nodes per subdomain in new partitioning
@@ -3541,6 +3408,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   //
   PetscLogEventEnd(receive_element_mask_event,0,0,0,0);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with masks");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with masks");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   int build_subdomains_reread_elements_event;
   PetscLogEventRegister("Reread eles",0,&build_subdomains_reread_elements_event);
   PetscLogEventBegin(build_subdomains_reread_elements_event,0,0,0,0);
@@ -3664,6 +3532,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   PetscLogEventRegister("Mark/send eles",0,&build_subdomains_send_marked_elements_event);
   PetscLogEventBegin(build_subdomains_send_marked_elements_event,0,0,0,0);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done marking elements");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done marking elements");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //
   //done with the element file
   //
@@ -3739,6 +3608,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
       elementNumbering_global_old2new[elementNumbering_global_new2old[eN]] = eN;
     }
   PetscLogEventEnd(build_subdomains_global_numbering_elements_event,0,0,0,0);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating element numbering new2old/old2new");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating element numbering new2old/old2new");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   int build_subdomains_faces_event;
   PetscLogEventRegister("Subd faces",0,&build_subdomains_faces_event);
@@ -3848,6 +3718,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   //done reading element boundaries
   elementBoundaryFile.close();
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading element boundaries");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading element boundaries");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   int nElementBoundaries_owned_subdomain=elementBoundaries_subdomain_owned.size(),
     nElementBoundaries_owned_new=0;
   MPI_Allreduce(&nElementBoundaries_owned_subdomain,&nElementBoundaries_owned_new,1,MPI_INT,MPI_SUM,PROTEUS_COMM_WORLD);
@@ -3920,6 +3791,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   valarray<int> elementBoundaryNumbering_global_old2new(newMesh.nElementBoundaries_global);
   ISGetIndices(elementBoundaryNumberingIS_global_new2old,&elementBoundaryNumbering_global_new2old);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Allocating elementBoudnary old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Allocating elementBoudnary old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   for (int ebN=0;ebN<newMesh.nElementBoundaries_global;ebN++)
     {
       elementBoundaryNumbering_global_old2new[elementBoundaryNumbering_global_new2old[ebN]] = ebN;
@@ -3928,6 +3800,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   ISDestroy(&elementBoundaryNumberingIS_subdomain_new2old);
   ISDestroy(&elementBoundaryNumberingIS_global_new2old);
   PetscLogEventEnd(build_subdomains_faces_event,0,0,0,0);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating elementBoudnary old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating elementBoudnary old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   int build_subdomains_edges_event;
   PetscLogEventRegister("Subd edges",0,&build_subdomains_edges_event);
@@ -4021,6 +3894,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   MPI_Allreduce(&nEdges_owned_subdomain,&nEdges_owned_new,1,MPI_INT,MPI_SUM,PROTEUS_COMM_WORLD);
   assert(nEdges_owned_new == nEdges_global);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading edges");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading edges");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //done with edge file
   //
   //just as with faces, we need to add edges along outer boundaries of star
@@ -4096,6 +3970,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   valarray<int> edgeNumbering_global_old2new(newMesh.nEdges_global);
   ISGetIndices(edgeNumberingIS_global_new2old,&edgeNumbering_global_new2old);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Setting edgeNumering old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Setting edgeNumering old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   for (int edN=0;edN<newMesh.nEdges_global;edN++)
     {
       edgeNumbering_global_old2new[edgeNumbering_global_new2old[edN]] = edN;
@@ -4103,6 +3978,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   ISRestoreIndices(edgeNumberingIS_global_new2old,&edgeNumbering_global_new2old);
   ISDestroy(&edgeNumberingIS_subdomain_new2old);
   ISDestroy(&edgeNumberingIS_global_new2old);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating edgeNumering old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done allocating edgeNumering old2new/new2old");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //
   //6. Figure out what is in the node stars but not locally owned, create ghost information
@@ -4254,6 +4130,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   ISDestroy(&nodeNumberingIS_subdomain_old2new);
   ISDestroy(&nodeNumberingIS_global_old2new);
   //done with vertex file (and all file reads at this point)
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading vertices");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done reading vertices");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
 
   newMesh.subdomainp->elementNodesArray = new int[newMesh.subdomainp->nElements_global*newMesh.subdomainp->nNodes_element];
@@ -4594,6 +4471,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
     }
   elementBoundaryNumbering_global_old2new.resize(0);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with material types");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with material types");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   PetscLogEventEnd(build_subdomains_renumber_event,0,0,0,0);
   int build_subdomains_cleanup_event;
   PetscLogEventRegister("Cleanup",0,&build_subdomains_cleanup_event);
@@ -4650,6 +4528,7 @@ int partitionNodesFromTriangleFiles(const MPI_Comm& PROTEUS_COMM_WORLD, const ch
   PetscLogEventEnd(build_subdomains_cleanup_event,0,0,0,0);
   PetscLogStagePop();
   PetscLogView(PETSC_VIEWER_STDOUT_WORLD);
+  //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with partitioning!");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   //ierr = enforceMemoryLimit(PROTEUS_COMM_WORLD, rank, max_rss_gb,"Done with partitioning!");CHKERRABORT(PROTEUS_COMM_WORLD, ierr);
   return 0;
 }
