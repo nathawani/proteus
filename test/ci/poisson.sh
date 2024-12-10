@@ -41,13 +41,13 @@ cp $PROJECT_DIR/poisson_3d_tetgen_c0p1_n.py $WORK_DIR
 cd $WORK_DIR
 
 start_time=$(date +%s)
-srun parun poisson_3d_tetgen_p.py poisson_3d_tetgen_c0p1_n.py -C "Refinement=NUM_REFINEMENT" -F -P "-ksp_rtol 1.0e-10 -ksp_type cg -pc_type bjacobi -sub_pc_type ilu -ksp_monitor" -p -l 2
+srun parun poisson_3d_tetgen_p.py poisson_3d_tetgen_c0p1_n.py -C "Refinement=NUM_REFINEMENT" -F -P "-ksp_type cg -pc_type gamg -ksp_monitor" -p -l 2
 end_time=$(date +%s)
 
 # Mark the time it finishes.
 echo "Date              = $(date)"
 echo "Total time to run the job is $(($end_time - $start_time))"
-echo $SLURM_NNODES  $SLURM_NTASKS  $(awk '/primitive calls/ {print $8}' $WORK_DIR/poisson_3d_tetgen_p.log | tail -n 1) >> ../poisson_time.txt
+echo $SLURM_NNODES  $SLURM_NTASKS  $(awk '/Newton it 0/ {T0=$2} /Newton it 1/ {T1=$2} END {print T1-T0}' $WORK_DIR/poisson_3d_tetgen_p.log) >> ../poisson_time.txt
 # exit the job
 exit 0
 
