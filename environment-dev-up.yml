@@ -1,4 +1,4 @@
-name: proteus-dev-up-240912
+name: proteus-dev-up
 channels:
   - conda-forge
   - defaults
@@ -6,7 +6,7 @@ dependencies:
   - pip
   - compilers
   - make
-  - setuptools
+  - setuptools==75.8.0
   - cython
   - pybind11
   - hdf5 =*=*mpich*
@@ -36,7 +36,7 @@ dependencies:
   - ncurses
   - python
   - ipyparallel
-  - xtensor-python
+  - xtensor-python==0.27.0
   - git-lfs
   - eigen
   - zoltan
