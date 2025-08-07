@@ -28,7 +28,7 @@ f = 4 * pi^2 * sin(2 * pi * x[d]); d in [0, nDimensions-1]
 # Domain - mesh - quadrature
 #----------------------------------------------------
 # Use the following PETSc options to run this test:
-# -dm_plex_dim 3 -dm_refine_volume_limit_pre 0.5 -dm_view ascii -dm_plex_separate_marker 1 -dm_distribute 0 -ksp_type cg -pc_type gamg
+# -dm_plex_dim 3 -dm_refine_pre 2 -dm_view ascii -dm_plex_separate_marker 1 -dm_distribute 1 -ksp_type cg -pc_type gamg
 
 name = "poisson_plex"
 plexMesh = PETSc.DMPlex()
@@ -39,7 +39,8 @@ domain = Domain.DMPlexDomain(plexMesh)
 domain.MeshOptions.use_plex = True
 
 boundaryTags = { 'bottom': 1, 'front':2, 'right':3, 'back': 4, 'left':5, 'top':6, 'obstacle':7}
-    
+domain.boundaryTags = boundaryTags
+
 restrictFineSolutionToAllMeshes=False
 parallelPartitioningType = MeshTools.MeshParallelPartitioningTypes.node
 domain.MeshOptions.nLayersOfOverlapForParallel = 0
@@ -68,20 +69,19 @@ class velEx(object):
 
 ##################################################
 #define coefficients a(x)=[a_{ij}] i,j=0,2, right hand side f(x)  and analytical solution u(x)
-#u = x*x + y*y + z*z, a_00 = x + 5, a_11 = y + 5.0 + a_22 = z + 10.0
+#u = x*x + y*y + z*z, a_00 = x + 5, a_11 = y + 5.0, a_22 = z + 10.0
 #f = -2*x -2*(5+x) -2*y-2*(5+y) -2*z-2*(10+z)
-#
 
 # def a5(x):
-#     return numpy.array([[1.0, 0.0, 0.0],[0.0, 1.0, 0.0],[0.0, 0.0, 1.0]],'d')
+#     return numpy.array([[x[0] + 5.0,0.0,0.0],[0.0,x[1] + 5.0,0.0],[0.0,0.0,x[2]+10.0]],'d')
 # def f5(x):
-#     return 4.0 * numpy.pi**2 * ( numpy.sin(2.0 * numpy.pi * x[0]) + numpy.sin(2.0 * numpy.pi * x[1]) + numpy.sin(2.0 * numpy.pi * x[2]) )
-# #'manufactured' analytical solution
+#     return -2.0*x[0] -2*(5.+x[0]) -2.*x[1]-2.*(5.+x[1]) -2.*x[2]-2.*(10+x[2])
+# # 'manufactured' analytical solution
 # class u5Ex(object):
 #     def __init__(self):
 #         pass
 #     def uOfX(self,x):
-#         return numpy.sin(2.0 * numpy.pi * x[0]) + numpy.sin(2.0 * numpy.pi * x[1]) + numpy.sin(2.0 * numpy.pi * x[2])
+#         return x[0]**2+x[1]**2+x[2]**2
 #     def uOfXT(self,X,T):
 #         return self.uOfX(X)
 #     def duOfX(self,X):
@@ -89,24 +89,6 @@ class velEx(object):
 #         return du
 #     def duOfXT(self,X,T):
 #         return self.duOfX(X)
-def a5(x):
-    return numpy.array([[x[0] + 5.0,0.0,0.0],[0.0,x[1] + 5.0,0.0],[0.0,0.0,x[2]+10.0]],'d')
-def f5(x):
-    return -2.0*x[0] -2*(5.+x[0]) -2.*x[1]-2.*(5.+x[1]) -2.*x[2]-2.*(10+x[2])
-#'manufactured' analytical solution
-class u5Ex(object):
-    def __init__(self):
-        pass
-    def uOfX(self,x):
-        return x[0]**2+x[1]**2+x[2]**2
-    def uOfXT(self,X,T):
-        return self.uOfX(X)
-    def duOfX(self,X):
-        du = 2.0*numpy.reshape(X[0:3],(3,))
-        return du
-    def duOfXT(self,X,T):
-        return self.duOfX(X)
-
 # #dirichlet boundary condition functions on (x=0,y,z), (x,y=0,z), (x,y=1,z), (x,y,z=0), (x,y,z=1)
 # def getDBC5(x,flag):
 #     if flag in [boundaryTags['bottom'],boundaryTags['top'],boundaryTags['front'],boundaryTags['back'],boundaryTags['left'],boundaryTags['right']]:
@@ -115,26 +97,40 @@ class u5Ex(object):
 #     pass
 # #specify flux on (x=1,y,z)
 # def getDiffFluxBC5(x,flag):
-#     pass
-#     # if flag == boundaryTags['right']:
-#     #     n = numpy.zeros((nd,),'d'); n[0]=1.0
-#     #     return lambda x,t: numpy.dot(velEx(u5Ex(),a5).uOfXT(x,t),n)
-#     # elif flag == 0:
-#     #     return lambda x,t: 0.0
+#     # pass
+#     if flag == boundaryTags['right']:
+#         n = numpy.zeros((nd,),'d'); n[0]=1.0
+#         return lambda x,t: numpy.dot(velEx(u5Ex(),a5).uOfXT(x,t),n)
+#     elif flag == 0:
+#         return lambda x,t: 0.0
 
+def a5(x):
+    return numpy.array([[1.0, 0.0, 0.0],[0.0, 1.0, 0.0],[0.0, 0.0, 1.0]],'d')
+def f5(x):
+    return 4.0 * numpy.pi**2 * ( numpy.sin(2.0 * numpy.pi * x[0]) + numpy.sin(2.0 * numpy.pi * x[1]) + numpy.sin(2.0 * numpy.pi * x[2]) )
+class u5Ex(object):
+    def __init__(self):
+        pass
+    def uOfX(self,x):
+        return numpy.sin(2.0 * numpy.pi * x[0]) + numpy.sin(2.0 * numpy.pi * x[1]) + numpy.sin(2.0 * numpy.pi * x[2])
+    def uOfXT(self,X,T):
+        return self.uOfX(X)
+    def duOfX(self,X):
+        du = 2.0*numpy.reshape(X[0:3],(3,))
+        return du
+    def duOfXT(self,X,T):
+        return self.duOfX(X)
 #dirichlet boundary condition functions on (x=0,y,z), (x,y=0,z), (x,y=1,z), (x,y,z=0), (x,y,z=1)
 def getDBC5(x,flag):
-    if flag in [boundaryTags['bottom'],boundaryTags['top'],boundaryTags['front'],boundaryTags['back'],boundaryTags['left']]:
+    if flag in [boundaryTags['bottom'],boundaryTags['top'],boundaryTags['front'],boundaryTags['back'],boundaryTags['left'], boundaryTags['right']]:
         return lambda x,t: u5Ex().uOfXT(x,t)
 def getAdvFluxBC5(x,flag):
     pass
 #specify flux on (x=1,y,z)
 def getDiffFluxBC5(x,flag):
-    if flag == boundaryTags['right']:
-        n = numpy.zeros((nd,),'d'); n[0]=1.0
-        return lambda x,t: numpy.dot(velEx(u5Ex(),a5).uOfXT(x,t),n)
-    elif flag == 0:
-        return lambda x,t: 0.0
+    pass
+
+
 
 #dirichlet boundary condition functions on (x=0,y,z), (x,y=0,z), (x,y=1,z), (x,y,z=0), (x,y,z=1)
 # def getDBC5(x,flag):

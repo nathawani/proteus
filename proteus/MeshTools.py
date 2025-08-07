@@ -612,13 +612,21 @@ class Mesh(object):
                                                                                     self.cmesh,
                                                                                     self.subdomainMesh.cmesh)
         #
+        # print("rank = ",comm.rank(),"\t elementOffsets_subdomain_owned = " + str(self.elementOffsets_subdomain_owned), flush=True)
+        # print("rank = ",comm.rank(),"\t elementNumbering_subdomain2global = " + str(self.elementNumbering_subdomain2global), flush=True)
+        # print("rank = ",comm.rank(),"\t nodeOffsets_subdomain_owned = " + str(self.nodeOffsets_subdomain_owned), flush=True)
+        # print("rank = ",comm.rank(),"\t nodeNumbering_subdomain2global = " + str(self.nodeNumbering_subdomain2global), flush=True)
+        # print("rank = ",comm.rank(),"elementBoundaryOffsets_subdomain_owned = " + str(self.elementBoundaryOffsets_subdomain_owned), flush=True)
+        # print("rank = ",comm.rank(),"elementBoundaryNumbering_subdomain2global = " + str(self.elementBoundaryNumbering_subdomain2global), flush=True)
+        # print("rank = ",comm.rank(),"edgeOffsets_subdomain_owned = " + str(self.edgeOffsets_subdomain_owned), flush=True)
+        # print("rank = ",comm.rank(),"edgeNumbering_subdomain2global = " + str(self.edgeNumbering_subdomain2global), flush=True)
         logEvent(memory("partitionMesh 3","MeshTools"),level=4)
+        # print("rank = ",comm.rank(), "elementBoundaryLocalElementBoundariesArray = ", self.subdomainMesh.elementBoundaryLocalElementBoundariesArray, flush=True)
         self.subdomainMesh.buildFromC(self.subdomainMesh.cmesh)
         self.subdomainMesh.nElements_owned = self.elementOffsets_subdomain_owned[comm.rank()+1] - self.elementOffsets_subdomain_owned[comm.rank()]
         self.subdomainMesh.nNodes_owned = self.nodeOffsets_subdomain_owned[comm.rank()+1] - self.nodeOffsets_subdomain_owned[comm.rank()]
         self.subdomainMesh.nElementBoundaries_owned = self.elementBoundaryOffsets_subdomain_owned[comm.rank()+1] - self.elementBoundaryOffsets_subdomain_owned[comm.rank()]
         self.subdomainMesh.nEdges_owned = self.edgeOffsets_subdomain_owned[comm.rank()+1] - self.edgeOffsets_subdomain_owned[comm.rank()]
-
         comm.barrier()
         logEvent(memory("partitionMesh 4","MeshTools"),level=4)
         logEvent("Number of Subdomain Elements Owned= "+str(self.subdomainMesh.nElements_owned))
@@ -646,6 +654,278 @@ class Mesh(object):
         # #cmeshTools.deleteMeshDataStructures(self.cmesh)
         # logEvent(memory("Without global mesh","Mesh"),level=1)
         # comm.endSequential()
+    
+    def partitionMeshFromDMPlex(self, plex):
+        from petsc4py import PETSc
+        assert isinstance(plex, PETSc.DMPlex), "plex must be a PETSc DMPlex object"
+        
+        from mpi4py import MPI
+        from . import Comm
+        comm = Comm.comm.mpi4py_comm
+        
+        self.plexMesh = True
+        self.rank = comm.rank
+        self.size = comm.size
+        self.subdomainMesh = self.__class__()
+        self.subdomainMesh.globalMesh = self
+        dim = plex.getDimension()
+        if dim == 3:
+            self.nNodes_element = 4 # num nodes per cell
+            self.nNodes_elementBoundary = 3 # num nodes per face
+            self.nElementBoundaries_element = 4 # num faces per cell
+        
+        cStart, cEnd = plex.getHeightStratum(0) # Total cells
+        fStart, fEnd = plex.getHeightStratum(1) # Total faces 
+        eStart, eEnd = plex.getHeightStratum(2) # Total edges
+        nStart, nEnd = plex.getHeightStratum(3) # Total nodes
+
+        # Subdomain-global means local points that includes ghost points. 
+        self.subdomainMesh.nElements_global             = cEnd - cStart
+        self.subdomainMesh.nNodes_global                = nEnd - nStart
+        self.subdomainMesh.nElementBoundaries_global    = fEnd - fStart
+        self.subdomainMesh.nEdges_global                = eEnd - eStart
+        
+        pointIS = plex.createPointNumbering()
+        pointISArray = pointIS.getIndices()
+        
+        cISArray = pointISArray[cStart:cEnd] # global cell indices
+        fISArray = pointISArray[fStart:fEnd] # global face indices
+        eISArray = pointISArray[eStart:eEnd] # global edge indices
+        nISArray = pointISArray[nStart:nEnd] # global node indices
+        p2p_nodeMap = np.array([np.where(nISArray==row)[0][0] for row in np.concatenate((nISArray[nISArray>=0], nISArray[nISArray<0]))])
+        
+        nElements_owned = (cISArray >= 0).sum()
+        nElementBoundaries_owned = (fISArray >= 0).sum()
+        nEdges_owned = (eISArray >= 0).sum()
+        nNodes_owned = (nISArray >= 0).sum()
+        self.nElements_global = comm.allreduce(nElements_owned, op=MPI.SUM)
+        self.nElementBoundaries_global = comm.allreduce(nElementBoundaries_owned, op=MPI.SUM)
+        self.nEdges_global = comm.allreduce(nEdges_owned, op=MPI.SUM)
+        self.nNodes_global = comm.allreduce(nNodes_owned, op=MPI.SUM)
+        
+        self.subdomainMesh.nNodes_element               = self.nNodes_element
+        self.subdomainMesh.nNodes_elementBoundary       = self.nNodes_elementBoundary
+        self.subdomainMesh.nElementBoundaries_element   = self.nElementBoundaries_element
+        
+        coordinatesVecLocal = plex.getCoordinatesLocal().array.reshape((self.subdomainMesh.nNodes_global, dim)) 
+        
+        self.subdomainMesh.nodeArray = coordinatesVecLocal[p2p_nodeMap]
+        
+        cISArray_owned = cISArray[cISArray>=0]
+        cISArray_shared = - (cISArray[cISArray<0] + 1)
+        nISArray_owned = nISArray[nISArray>=0] - self.nElements_global
+        nISArray_shared = - (nISArray[nISArray<0] + 1) - self.nElements_global
+        fISArray_owned = fISArray[fISArray>=0] - (self.nElements_global + self.nNodes_global)
+        fISArray_shared = - (fISArray[fISArray<0] + 1) - (self.nElements_global + self.nNodes_global) 
+        eISArray_owned = eISArray[eISArray>=0] - (self.nElements_global + self.nElementBoundaries_global + self.nNodes_global)
+        eISArray_shared = - (eISArray[eISArray<0] + 1) - (self.nElements_global + self.nElementBoundaries_global + self.nNodes_global)
+        
+        nISArray_sorted = np.concatenate((nISArray_owned, nISArray_shared))
+        cISArray_sorted = np.concatenate((cISArray_owned, cISArray_shared))
+        fISArray_sorted = np.concatenate((fISArray_owned, fISArray_shared))
+        eISArray_sorted = np.concatenate((eISArray_owned, eISArray_shared))
+        
+        self.nodeNumbering_subdomain2global = nISArray_sorted.astype(np.int32)
+        self.elementNumbering_subdomain2global = cISArray_sorted.astype(np.int32)
+        self.elementBoundaryNumbering_subdomain2global = fISArray_sorted.astype(np.int32)
+        self.edgeNumbering_subdomain2global = eISArray_sorted.astype(np.int32)
+        
+        self.nodeOffsets_subdomain_owned = np.zeros(self.size+1, dtype=np.int32)
+        self.elementOffsets_subdomain_owned = np.zeros(self.size+1, dtype=np.int32)
+        self.elementBoundaryOffsets_subdomain_owned = np.zeros(self.size+1, dtype=np.int32)
+        self.edgeOffsets_subdomain_owned = np.zeros(self.size+1, dtype=np.int32)
+                
+        local_nNodes = comm.gather(nNodes_owned, root=0)
+        local_nElements = comm.gather(nElements_owned, root=0)
+        local_nElementBoundaries = comm.gather(nElementBoundaries_owned, root=0)
+        local_nEdges = comm.gather(nEdges_owned, root=0)
+        if self.rank == 0:
+            self.nodeOffsets_subdomain_owned[0] = 0
+            self.elementOffsets_subdomain_owned[0] = 0
+            self.elementBoundaryOffsets_subdomain_owned[0] = 0
+            self.edgeOffsets_subdomain_owned[0] = 0
+            for i in range(self.size):
+                self.nodeOffsets_subdomain_owned[i+1] = local_nNodes[i] + self.nodeOffsets_subdomain_owned[i]
+                self.elementOffsets_subdomain_owned[i+1] = local_nElements[i] + self.elementOffsets_subdomain_owned[i]
+                self.elementBoundaryOffsets_subdomain_owned[i+1] = local_nElementBoundaries[i] + self.elementBoundaryOffsets_subdomain_owned[i]
+                self.edgeOffsets_subdomain_owned[i+1] = local_nEdges[i] + self.edgeOffsets_subdomain_owned[i]
+                
+            assert self.nodeOffsets_subdomain_owned[-1] == self.nNodes_global, "Last offset in nodeOffsets_subdomain_owned = " + self.nodeOffsets_subdomain_owned[-1] + "does not match nNodes_global = " + self.nNodes_global
+            assert self.elementOffsets_subdomain_owned[-1] == self.nElements_global, "Last offset in elementOffsets_subdomain_owned = " + self.elementOffsets_subdomain_owned[-1] + "does not match nElements_global = " + self.nElements_global
+            assert self.elementBoundaryOffsets_subdomain_owned[-1] == self.nElementBoundaries_global, "Last offset in elementBoundaryOffsets_subdomain_owned = " + self.elementBoundaryOffsets_subdomain_owned[-1] + "does not match nElementBoundaries_global = " + self.nElementBoundaries_global
+            assert self.edgeOffsets_subdomain_owned[-1] == self.nEdges_global, "Last offset in edgeOffsets_subdomain_owned = " + self.edgeOffsets_subdomain_owned[-1] + "does not match nEdges_global = " + self.nEdges_global
+        
+        self.nodeOffsets_subdomain_owned = comm.bcast(self.nodeOffsets_subdomain_owned, root=0)
+        self.elementOffsets_subdomain_owned = comm.bcast(self.elementOffsets_subdomain_owned, root=0)
+        self.elementBoundaryOffsets_subdomain_owned = comm.bcast(self.elementBoundaryOffsets_subdomain_owned, root=0)
+        self.edgeOffsets_subdomain_owned = comm.bcast(self.edgeOffsets_subdomain_owned, root=0)
+        
+        self.subdomainMesh.nElements_owned = nElements_owned
+        self.subdomainMesh.nNodes_owned = nNodes_owned
+        self.subdomainMesh.nElementBoundaries_owned = nElementBoundaries_owned
+        self.subdomainMesh.nEdges_owned = nEdges_owned
+        
+        self.subdomainMesh.elementNodesArray = np.empty((self.subdomainMesh.nElements_global, self.subdomainMesh.nNodes_element), dtype=np.int32)
+        
+        self.subdomainMesh.elementBarycentersArray = np.empty((self.subdomainMesh.nElements_global, dim), dtype=np.float64)
+        
+        self.subdomainMesh.elementInnerDiametersArray = np.empty(self.subdomainMesh.nElements_global, dtype=np.float64)
+        
+        self.subdomainMesh.elementMaterialTypes = np.empty(self.subdomainMesh.nElements_global, dtype=np.int32)
+        
+        self.subdomainMesh.elementBoundariesArray = np.empty((self.subdomainMesh.nElements_global, self.subdomainMesh.nElementBoundaries_element), dtype=np.int32)
+        
+        for i in np.arange(cStart, cEnd):
+            #TO-Do: Need a better way to set material types
+            self.subdomainMesh.elementMaterialTypes[i] = 1
+            # self.subdomainMesh.elementMaterialTypes[i] = plex.getLabelValue('marker', i)
+            elementNodesArrayUnsorted = np.array(plex.getTransitiveClosure(i)[0][-self.subdomainMesh.nNodes_element:] - self.subdomainMesh.nElements_global)
+            
+            # Adjust the ordering of faces to match the Proteus ordering.
+            
+            self.subdomainMesh.elementBoundariesArray[i] = plex.getCone(i) - (self.subdomainMesh.nNodes_global + self.subdomainMesh.nElements_global)
+            elementNodeList = []
+            elementBoundaryNodesArrayTemp = np.empty((self.subdomainMesh.nElementBoundaries_element, self.subdomainMesh.nNodes_elementBoundary), dtype=np.int32)
+            j=0
+            for face in plex.getCone(i):
+                elementBoundaryNodesArrayTemp[j] = plex.getTransitiveClosure(face)[0][- self.subdomainMesh.nNodes_elementBoundary:] - self.subdomainMesh.nElements_global
+                # print(face, elementBoundaryNodesArrayTemp[j])
+                mask = np.where(~np.isin(elementNodesArrayUnsorted, elementBoundaryNodesArrayTemp[j]))[0]
+                index = int(elementNodesArrayUnsorted[mask])
+                # print(mask, index)
+                elementNodeList.append(index)
+                j += 1
+                # Compute the total surface area of the element
+            volume = plex.computeCellGeometryFVM(i)[0]
+            area = 0.0
+            elementNodes = np.array([np.where(p2p_nodeMap == petscNode)[0][0] for petscNode in elementNodeList], dtype=np.int32)
+            for idx in range(self.subdomainMesh.nNodes_element):
+                triangleNodes = np.delete(elementNodes, idx)
+                v1 = self.subdomainMesh.nodeArray[triangleNodes[1]] - self.subdomainMesh.nodeArray[triangleNodes[0]]
+                v2 = self.subdomainMesh.nodeArray[triangleNodes[2]] - self.subdomainMesh.nodeArray[triangleNodes[0]]
+                area += 0.5 * np.linalg.norm(np.cross(v1, v2))
+            innerDiameter = 6.0 * volume / area
+            self.subdomainMesh.elementInnerDiametersArray[i] = innerDiameter
+            
+            self.subdomainMesh.elementNodesArray[i] = elementNodes
+            # self.subdomainMesh.elementNodesArray[i] = np.array(elementNodeList, dtype=np.int32)
+            self.subdomainMesh.elementBarycentersArray[i] = plex.computeCellGeometryFVM(i)[1]
+            # self.subdomainMesh.elementBarycentersArray[i] = np.sum([self.subdomainMesh.nodeArray[n] for n in elementNodeList], axis=0) / self.subdomainMesh.nNodes_element
+                    
+        
+        self.subdomainMesh.elementBoundaryElementsArray = np.empty((self.subdomainMesh.nElementBoundaries_global, 2), dtype=np.int32)
+        self.subdomainMesh.elementBoundaryLocalElementBoundariesArray = np.empty((self.subdomainMesh.nElementBoundaries_global, 2), dtype=np.int32)
+        self.subdomainMesh.interiorElementBoundariesArray = np.array([], dtype=np.int32)
+        self.subdomainMesh.exteriorElementBoundariesArray = np.array([], dtype=np.int32)
+        self.subdomainMesh.elementBoundaryMaterialTypes = np.empty(self.subdomainMesh.nElementBoundaries_global, dtype=np.int32)
+        self.subdomainMesh.elementBoundaryNodesArray = np.empty((self.subdomainMesh.nElementBoundaries_global, self.subdomainMesh.nNodes_elementBoundary), dtype=np.int32)
+        self.subdomainMesh.elementBoundaryBarycentersArray = np.empty((self.subdomainMesh.nElementBoundaries_global, dim), dtype=np.float64)
+        self.subdomainMesh.elementBoundaryDiametersArray = np.empty(self.subdomainMesh.nElementBoundaries_global, dtype=np.float64)
+        
+        for i in np.arange(fStart, fEnd):
+            # self.subdomainMesh.elementBoundaryNodesArray[i - fStart] = plex.getTransitiveClosure(i)[0][- self.subdomainMesh.nNodes_elementBoundary:]  - self.subdomainMesh.nElements_global
+            self.subdomainMesh.elementBoundaryNodesArray[i - fStart] = np.array([np.where(p2p_nodeMap == petscNode)[0][0] for petscNode in plex.getTransitiveClosure(i)[0][- self.subdomainMesh.nNodes_elementBoundary:] - self.subdomainMesh.nElements_global], dtype=np.int32)
+            
+            self.subdomainMesh.elementBoundaryBarycentersArray[i - fStart] = np.sum([self.subdomainMesh.nodeArray[n] for n in self.subdomainMesh.elementBoundaryNodesArray[i - fStart]], axis=0) / self.subdomainMesh.nNodes_elementBoundary
+            
+            norm = np.zeros(self.subdomainMesh.nNodes_elementBoundary)
+            for j in range(self.subdomainMesh.nNodes_elementBoundary):
+                if j == self.subdomainMesh.nNodes_elementBoundary - 1:
+                    norm[j] = np.linalg.norm(self.subdomainMesh.nodeArray[self.subdomainMesh.elementBoundaryNodesArray[i - fStart][j]] - self.subdomainMesh.nodeArray[self.subdomainMesh.elementBoundaryNodesArray[i - fStart][0]])
+                else:
+                    norm[j] = np.linalg.norm(self.subdomainMesh.nodeArray[self.subdomainMesh.elementBoundaryNodesArray[i - fStart][j]] - self.subdomainMesh.nodeArray[self.subdomainMesh.elementBoundaryNodesArray[i - fStart][j + 1]])
+            self.subdomainMesh.elementBoundaryDiametersArray[i - fStart] = np.max(norm)
+            
+            fBdIndex0 = np.where(np.all(self.subdomainMesh.nodeArray[self.subdomainMesh.elementBoundaryNodesArray[i - fStart]] == 0, axis=0))[0]
+            fBdIndex1 = np.where(np.all(self.subdomainMesh.nodeArray[self.subdomainMesh.elementBoundaryNodesArray[i - fStart]] == 1, axis=0))[0]
+            if np.size(fBdIndex0)>0:
+                match fBdIndex0:
+                    case 0:
+                        self.subdomainMesh.elementBoundaryMaterialTypes[i - fStart] = 5 # left
+                    case 1:
+                        self.subdomainMesh.elementBoundaryMaterialTypes[i - fStart] = 2 # front
+                    case 2:
+                        self.subdomainMesh.elementBoundaryMaterialTypes[i - fStart] = 1 # bottom
+            elif np.size(fBdIndex1)>0:
+                match fBdIndex1:
+                    case 0:
+                        self.subdomainMesh.elementBoundaryMaterialTypes[i - fStart] = 3 # right
+                    case 1:
+                        self.subdomainMesh.elementBoundaryMaterialTypes[i - fStart] = 4 # back
+                    case 2:
+                        self.subdomainMesh.elementBoundaryMaterialTypes[i - fStart] = 6 # top
+            else:
+                self.subdomainMesh.elementBoundaryMaterialTypes[i - fStart] = 0 # default material
+            
+            if np.size(plex.getSupport(i)) == 1:
+                self.subdomainMesh.elementBoundaryElementsArray[i - fStart] = np.insert(plex.getSupport(i), 1, -1)
+                self.subdomainMesh.exteriorElementBoundariesArray = np.concatenate((self.subdomainMesh.exteriorElementBoundariesArray, np.array([i - fStart])))
+                self.subdomainMesh.elementBoundaryLocalElementBoundariesArray[i - fStart] = np.insert(np.argmax(i == plex.getCone(plex.getSupport(i))), 1, -1)
+            else:
+                self.subdomainMesh.elementBoundaryElementsArray[i - fStart] = plex.getSupport(i)
+                self.subdomainMesh.interiorElementBoundariesArray = np.concatenate((self.subdomainMesh.interiorElementBoundariesArray, np.array([i - fStart])))
+                self.subdomainMesh.elementBoundaryLocalElementBoundariesArray[i - fStart][0] = np.argmax(i == plex.getCone(plex.getSupport(i)[0]))
+                self.subdomainMesh.elementBoundaryLocalElementBoundariesArray[i - fStart][1] = np.argmax(i == plex.getCone(plex.getSupport(i)[1]))
+        
+        self.subdomainMesh.nInteriorElementBoundaries_global = np.size(self.subdomainMesh.interiorElementBoundariesArray)
+        self.subdomainMesh.nExteriorElementBoundaries_global = np.size(self.subdomainMesh.exteriorElementBoundariesArray)
+        
+        # Get the cone of each edge to get the list of nodes 
+        self.subdomainMesh.edgeNodesArray = np.empty((self.subdomainMesh.nEdges_global, 2), dtype=np.int32)
+        for i in np.arange(eStart, eEnd):
+            self.subdomainMesh.edgeNodesArray[i - eStart] = np.array([np.where(p2p_nodeMap == petscNode)[0][0] for petscNode in plex.getCone(i) - self.subdomainMesh.nElements_global], dtype=np.int32)
+        
+        
+        self.subdomainMesh.nodeMaterialTypes = np.zeros(self.subdomainMesh.nNodes_global, dtype=np.int32)
+        self.subdomainMesh.max_nNodeNeighbors_node = 0
+        for i in np.arange(nStart, nEnd):
+            # if plex.getLabelValue('marker', i) == -1:
+            #     self.subdomainMesh.nodeMaterialTypes[i - nStart] = 0 # default material
+            # else:
+            #     self.subdomainMesh.nodeMaterialTypes[i - nStart] = plex.getLabelValue('marker', i)
+            
+            match self.subdomainMesh.nodeArray[i - nStart][0]:
+                case 0.0:
+                    self.subdomainMesh.nodeMaterialTypes[i - nStart] = 5
+                case 1.0:
+                    self.subdomainMesh.nodeMaterialTypes[i - nStart] = 3
+            match self.subdomainMesh.nodeArray[i - nStart][1]:
+                case 0.0:
+                    self.subdomainMesh.nodeMaterialTypes[i - nStart] = 1
+                case 1.0:
+                    self.subdomainMesh.nodeMaterialTypes[i - nStart] = 6
+            match self.subdomainMesh.nodeArray[i - nStart][2]:
+                case 0.0:
+                    self.subdomainMesh.nodeMaterialTypes[i - nStart] = 2
+                case 1.0:
+                    self.subdomainMesh.nodeMaterialTypes[i - nStart] = 4
+            nAdjacentNodes = int(sum((plex.getAdjacency(i)<nEnd) &  (plex.getAdjacency(i)>=nStart)) - 1)
+            
+            # Update max_nNodeNeighbors_node
+            self.subdomainMesh.max_nNodeNeighbors_node = nAdjacentNodes if nAdjacentNodes > self.subdomainMesh.max_nNodeNeighbors_node else self.subdomainMesh.max_nNodeNeighbors_node
+        
+        # print("rank= ",comm.rank, "exteriorElementBoundariesArray = ", self.subdomainMesh.exteriorElementBoundariesArray, flush=True)
+        # print("rank= ",comm.rank(), "interiorElementBoundariesArray = ", self.subdomainMesh.interiorElementBoundariesArray, flush=True)
+        # print("rank= ",comm.rank, "exterior_elementBoundaryNodesArray = ",self.subdomainMesh.elementBoundaryNodesArray[self.subdomainMesh.exteriorElementBoundariesArray], flush=True)
+        # print("rank= ",comm.rank(), "nodeArray = ", self.subdomainMesh.nodeArray[self.subdomainMesh.elementBoundaryNodesArray[self.subdomainMesh.exteriorElementBoundariesArray]], flush=True)
+        # print("rank= ",comm.rank(), "interior_nodeArray = ", self.subdomainMesh.nodeArray[self.subdomainMesh.elementBoundaryElementsArray[self.subdomainMesh.interiorElementBoundariesArray][0]], flush=True)
+        # print("rank= ",comm.rank, "elementBoundaryNumbering_subdomain2global = ", self.elementBoundaryNumbering_subdomain2global, flush=True)
+        # print("rank= ",comm.rank, "elementBoundaryOffsets_subdomain_owned = ", self.elementBoundaryOffsets_subdomain_owned, flush=True)
+        # print("rank = ", comm.rank, "Number of Subdomain elementBoundaries Owned= "+str(self.subdomainMesh.nElementBoundaries_owned))
+        # print("rank= ",comm.rank, "elementBoundaryMaterialTypes = ", self.subdomainMesh.elementBoundaryMaterialTypes, flush=True)
+        # print("rank = ", self.rank, "nodeMaterialTypes = ", self.subdomainMesh.nodeMaterialTypes, "\n", flush=True)
+        # print("rank = ", self.rank, "elementBoundaryMaterialTypes = ", self.subdomainMesh.elementBoundaryMaterialTypes, "\n", flush=True)
+        comm.barrier()
+        logEvent(memory("partitionMesh 4","MeshTools"),level=4)
+        logEvent("Number of Subdomain Elements Owned= "+str(self.subdomainMesh.nElements_owned))
+        logEvent("Number of Subdomain Elements = "+str(self.subdomainMesh.nElements_global))
+        logEvent("Number of Subdomain Nodes Owned= "+str(self.subdomainMesh.nNodes_owned))
+        logEvent("Number of Subdomain Nodes = "+str(self.subdomainMesh.nNodes_global))
+        logEvent("Number of Subdomain elementBoundaries Owned= "+str(self.subdomainMesh.nElementBoundaries_owned))
+        logEvent("Number of Subdomain elementBoundaries = "+str(self.subdomainMesh.nElementBoundaries_global))
+        logEvent("Number of Subdomain Edges Owned= "+str(self.subdomainMesh.nEdges_owned))
+        logEvent("Number of Subdomain Edges = "+str(self.subdomainMesh.nEdges_global))
+    
     def partitionMeshFromFiles(self,filebase,base,nLayersOfOverlap=1,parallelPartitioningType=MeshParallelPartitioningTypes.node):
         from . import cmeshTools
         from . import Comm
@@ -747,6 +1027,7 @@ class Mesh(object):
         # #cmeshTools.deleteMeshDataStructures(self.cmesh)
         # logEvent(memory("Without global mesh","Mesh"),level=1)
         # comm.endSequential()
+    
     def writeMeshXdmf(self,ar,name='',t=0.0,init=False,meshChanged=False,Xdmf_ElementTopology="Triangle",tCount=0, EB=False):
         if self.arGridCollection is not None:
             init = False
@@ -2811,201 +3092,203 @@ class TetrahedralMesh(Mesh):
         return self.refineFreudenthalBey(oldMesh)
 
     def generateFromPlex(self, plex, parallel=False):
-        # from petsc4py import PETSc
+        from petsc4py import PETSc
+        assert isinstance(plex, PETSc.DMPlex), "Input must be a PETSc DMPlex object"
+        
         from . import Comm
         comm = Comm.comm.mpi4py_comm
         self.rank = comm.rank
         self.size = comm.size
-        if self.rank == 0: 
-            self.plexMesh = True
-
-            # PETSc numbering convension in 3D : cells -> vertices -> faces -> edges
-            # But the point range can be accessed using HeightStratum; height 0 = cells, 1 = faces, 2 = edges, and 3 = vertices.
-            
-            # Proteus convension: 
-            # nNodes             = vertices
-            # nElements          = cells
-            # nelementBoundaries = faces
-            # nEdges             = edges
-            dim = plex.getDimension()
-            
-            # ToDo - conditions for 1D and 2D         
-            if dim == 3:
-                self.nNodes_element = 4 # num nodes per cell
-                self.nNodes_elementBoundary = 3 # num nodes per face
-                self.nElementBoundaries_element = 4 # num faces per cell
-            
-            cStart, cEnd = plex.getHeightStratum(0) # Total cells
-            fStart, fEnd = plex.getHeightStratum(1) # Total faces 
-            eStart, eEnd = plex.getHeightStratum(2) # Total edges
-            nStart, nEnd = plex.getHeightStratum(3) # Total nodes
-
-
-            self.nElements_global           = cEnd - cStart
-            self.nElementBoundaries_global  = fEnd - fStart
-            self.nEdges_global              = eEnd - eStart
-            self.nNodes_global              = nEnd - nStart
-            
-            # get coordinate array from PETSc Vec TODO - get this working for -dm_refine 0 and -dm_refine >0
-            # coordinatesVec = plex.getCoordinatesLocal() # Works with -dm_refine >0 only
-            coordinatesVec = plex.getCoordinates() # Works with -dm_refine 0 only
-            
-            self.nodeArray = coordinatesVec.array.reshape(self.nNodes_global, dim)
-
-            # All the entities have global numbering starting from 0
-            # So to convert PETSc numering to Proteus numbering we subtract the total number of entities below in DAG from the numbering of the required entity. For instance, In the cube with 6 tetrahedrons, we convert the node numering from plex [6,14) by subtracting total numer of enetities below, which is 6 cells (Recall DAG sequence mentioned above).
-            
-            
-            self.elementNodesArray = np.empty((self.nElements_global, self.nNodes_element), dtype=np.int32)
-            # for i in range(self.nElements_global):
-            #     self.elementNodesArray[i] = plex.getTransitiveClosure(i)[0][-self.nNodes_element:] - self.nElements_global
-            
-            # Loop over each node and get a transitive closure without cone and get the number of entries less than the number of total cells in the array to get the nodeElementOffsets and use those entry to populate  nodeElementsArray 
-            elementOffsetList = [0]
-            starOffsetList = [0]
-            self.nodeElementsArray = np.array([], dtype=np.int32)
-            self.nodeStarArray = np.array([], dtype=np.int32)
-            self.nodeMaterialTypes = np.array([], dtype=np.int32)
-            self.max_nNodeNeighbors_node = 0
-            elementOffset = 0
-            starOffset = 0
-            logEvent("Loop 1")
-            for i in np.arange(nStart, nEnd):
-                self.nodeMaterialTypes = np.append(self.nodeMaterialTypes, plex.getCellTypeLabel().getValue(i))
-                
-                nAdjacentElements = int(sum(plex.getAdjacency(i) < self.nElements_global))
-                nAdjacentNodes = int(sum((plex.getAdjacency(i)<nEnd) &  (plex.getAdjacency(i)>=nStart)) - 1)
-                
-                # Update nodeElements
-                self.nodeElementsArray = np.concatenate((self.nodeElementsArray, plex.getTransitiveClosure(i, useCone=False)[0][-nAdjacentElements:]))
-                # Update node Star
-                nodeAdjacencyBoolArray = (plex.getAdjacency(i)<nEnd) &  (plex.getAdjacency(i)>=nStart)
-                self.nodeStarArray = np.concatenate((self.nodeStarArray, plex.getAdjacency(i)[nodeAdjacencyBoolArray][1:] - nStart))
-                # Update max_nNodeNeighbors_node
-                self.max_nNodeNeighbors_node = nAdjacentNodes if nAdjacentNodes > self.max_nNodeNeighbors_node else self.max_nNodeNeighbors_node
-                
-                # Update offset
-                elementOffset += nAdjacentElements
-                starOffset += nAdjacentNodes
-                elementOffsetList.append(elementOffset)
-                starOffsetList.append(starOffset)        
-            self.nodeElementOffsets = np.array(elementOffsetList, dtype=np.int32)
-            self.nodeStarOffsets = np.array(starOffsetList, dtype=np.int32)
-
-            # Get the cone of each cell to get the faces
-            self.elementBoundariesArray = np.empty((self.nElements_global, self.nElementBoundaries_element), dtype=np.int32)
-            self.elementMaterialTypes = np.array([], dtype=np.int32)
-            logEvent("Loop 2")
-            for i in np.arange(cStart, cEnd):
-                elementNodesArrayUnsorted = np.array(plex.getTransitiveClosure(i)[0][-self.nNodes_element:] - self.nElements_global)
-                # self.elementNodesArray[i] = plex.getTransitiveClosure(i)[0][-self.nNodes_element:] - self.nElements_global
-                self.elementMaterialTypes = np.append(self.elementMaterialTypes, plex.getCellTypeLabel().getValue(i))
-                # Adjust the ordering of faces to match the Proteus convention. 
-                
-                # print("elementNodesArrayUnsorted", elementNodesArrayUnsorted)
-                self.elementBoundariesArray[i] = plex.getCone(i) - (self.nNodes_global + self.nElements_global)
-                elementNodeList = []
-                elementBoundaryNodesArrayTemp = np.empty((self.nElementBoundaries_element, self.nNodes_elementBoundary), dtype=np.int32)
-                j=0
-                for face in plex.getCone(i):
-                    elementBoundaryNodesArrayTemp[j] = plex.getTransitiveClosure(face)[0][- self.nNodes_elementBoundary:] - self.nElements_global
-                    # print(face, elementBoundaryNodesArrayTemp[j])
-                    mask = np.where(~np.isin(elementNodesArrayUnsorted, elementBoundaryNodesArrayTemp[j]))[0]
-                    index = int(elementNodesArrayUnsorted[mask])
-                    # print(mask, index)
-                    elementNodeList.append(index)
-                    j += 1
-                # print("elementNodeList", elementNodeList)
-                self.elementNodesArray[i] = np.array(elementNodeList, dtype=np.int32)
-                
-            
-            # Loop over each face to get the transitive closure and get the nodes
-            # self.elementBoundaryNodesArray = np.empty((self.nElementBoundaries_global, self.nNodes_elementBoundary), dtype=np.int32)
-            # self.elementBoundaryMaterialTypes = np.array([], dtype=np.int32)
-            # for i in np.arange(fStart, fEnd):
-                # self.elementBoundaryMaterialTypes = np.append(self.elementBoundaryMaterialTypes, plex.getCellTypeLabel().getValue(i))
-                # self.elementBoundaryNodesArray[i - fStart] = plex.getTransitiveClosure(i)[0][- self.nNodes_elementBoundary:]  - self.nElements_global
-            
-            # loop over faces to get the support. Add -1 as a second entry gfor the boundary faces.
-            self.elementBoundaryElementsArray = np.empty((self.nElementBoundaries_global, 2), dtype=np.int32)
-            self.interiorElementBoundariesArray = np.array([], dtype=np.int32)
-            self.exteriorElementBoundariesArray = np.array([], dtype=np.int32)
-            self.elementBoundaryMaterialTypes = np.array([], dtype=np.int32)
-            logEvent("Loop 3")
-            for i in np.arange(fStart, fEnd):
-                self.elementBoundaryMaterialTypes = np.append(self.elementBoundaryMaterialTypes, plex.getCellTypeLabel().getValue(i))
-                if np.size(plex.getSupport(i)) == 1:
-                    self.elementBoundaryElementsArray[i - fStart] = np.insert(plex.getSupport(i), 1, -1)
-                    self.exteriorElementBoundariesArray = np.concatenate((self.exteriorElementBoundariesArray, np.array([i - fStart])))
-                else:
-                    self.elementBoundaryElementsArray[i - fStart] = plex.getSupport(i)
-                    self.interiorElementBoundariesArray = np.concatenate((self.interiorElementBoundariesArray, np.array([i - fStart])))
-            
-            self.nInteriorElementBoundaries_global = np.size(self.interiorElementBoundariesArray)
-            self.nExteriorElementBoundaries_global = np.size(self.exteriorElementBoundariesArray)
-            
-            # Get the cone of each edge to get the list of nodes 
-            self.edgeNodesArray = np.empty((self.nEdges_global, 2), dtype=np.int32)
-            logEvent("Loop 4")
-            for i in np.arange(eStart, eEnd):
-                self.edgeNodesArray[i - eStart] = plex.getCone(i) - self.nElements_global
-            
-            
-            self.elementNeighborsArray = np.empty((self.nElements_global, self.nElementBoundaries_global), dtype=np.int32)
-            
-            logEvent("Done generating mesh from DMPlex")
-
-            # ToDo stuff
-            self.h = 0.0
-            self.hMin = 0.0
-            self.sigmaMax = 0.0
-            self.volume   = 0.0            
+        # parallel = False
+        if parallel:
+            self.partitionMeshFromDMPlex(plex) 
         else:
-            pass
+            if self.rank == 0: 
+                # PETSc numbering convension in 3D : cells -> vertices -> faces -> edges
+                # But the point range can be accessed using HeightStratum; height 0 = cells, 1 = faces, 2 = edges, and 3 = vertices.
+                
+                # Proteus convension: 
+                # nNodes             = vertices
+                # nElements          = cells
+                # nelementBoundaries = faces
+                # nEdges             = edges
+                dim = plex.getDimension()
+                
+                # ToDo - conditions for 1D and 2D         
+                if dim == 3:
+                    self.nNodes_element = 4 # num nodes per cell
+                    self.nNodes_elementBoundary = 3 # num nodes per face
+                    self.nElementBoundaries_element = 4 # num faces per cell
+                
+                cStart, cEnd = plex.getHeightStratum(0) # Total cells
+                fStart, fEnd = plex.getHeightStratum(1) # Total faces 
+                eStart, eEnd = plex.getHeightStratum(2) # Total edges
+                nStart, nEnd = plex.getHeightStratum(3) # Total nodes
+
+
+                self.nElements_global           = cEnd - cStart
+                self.nElementBoundaries_global  = fEnd - fStart
+                self.nEdges_global              = eEnd - eStart
+                self.nNodes_global              = nEnd - nStart
+                
+                # get coordinate array from PETSc Vec TODO - get this working for -dm_refine 0 and -dm_refine >0
+                # coordinatesVec = plex.getCoordinatesLocal() # Works with -dm_refine >0 only
+                coordinatesVec = plex.getCoordinates() # Works with -dm_refine 0 only
+                
+                self.nodeArray = coordinatesVec.array.reshape(self.nNodes_global, dim)
+
+                # All the entities have global numbering starting from 0
+                # So to convert PETSc numering to Proteus numbering we subtract the total number of entities below in DAG from the numbering of the required entity. For instance, In the cube with 6 tetrahedrons, we convert the node numering from plex [6,14) by subtracting total numer of enetities below, which is 6 cells (Recall DAG sequence mentioned above).
+                
+                
+                self.elementNodesArray = np.empty((self.nElements_global, self.nNodes_element), dtype=np.int32)
+                # for i in range(self.nElements_global):
+                #     self.elementNodesArray[i] = plex.getTransitiveClosure(i)[0][-self.nNodes_element:] - self.nElements_global
+                
+                # Loop over each node and get a transitive closure without cone and get the number of entries less than the number of total cells in the array to get the nodeElementOffsets and use those entry to populate  nodeElementsArray 
+                elementOffsetList = [0]
+                starOffsetList = [0]
+                self.nodeElementsArray = np.array([], dtype=np.int32)
+                self.nodeStarArray = np.array([], dtype=np.int32)
+                self.nodeMaterialTypes = np.array([], dtype=np.int32)
+                self.max_nNodeNeighbors_node = 0
+                elementOffset = 0
+                starOffset = 0
+                logEvent("Loop 1")
+                for i in np.arange(nStart, nEnd):
+                    self.nodeMaterialTypes = np.append(self.nodeMaterialTypes, plex.getLabelValue('marker', i))
+                    
+                    nAdjacentElements = int(sum(plex.getAdjacency(i) < self.nElements_global))
+                    nAdjacentNodes = int(sum((plex.getAdjacency(i)<nEnd) &  (plex.getAdjacency(i)>=nStart)) - 1)
+                    
+                    # Update nodeElements
+                    self.nodeElementsArray = np.concatenate((self.nodeElementsArray, plex.getTransitiveClosure(i, useCone=False)[0][-nAdjacentElements:]))
+                    # Update node Star
+                    nodeAdjacencyBoolArray = (plex.getAdjacency(i)<nEnd) &  (plex.getAdjacency(i)>=nStart)
+                    self.nodeStarArray = np.concatenate((self.nodeStarArray, plex.getAdjacency(i)[nodeAdjacencyBoolArray][1:] - nStart))
+                    # Update max_nNodeNeighbors_node
+                    self.max_nNodeNeighbors_node = nAdjacentNodes if nAdjacentNodes > self.max_nNodeNeighbors_node else self.max_nNodeNeighbors_node
+                    
+                    # Update offset
+                    elementOffset += nAdjacentElements
+                    starOffset += nAdjacentNodes
+                    elementOffsetList.append(elementOffset)
+                    starOffsetList.append(starOffset)        
+                self.nodeElementOffsets = np.array(elementOffsetList, dtype=np.int32)
+                self.nodeStarOffsets = np.array(starOffsetList, dtype=np.int32)
+
+                # Get the cone of each cell to get the faces
+                self.elementBoundariesArray = np.empty((self.nElements_global, self.nElementBoundaries_element), dtype=np.int32)
+                self.elementMaterialTypes = np.array([], dtype=np.int32)
+                logEvent("Loop 2")
+                for i in np.arange(cStart, cEnd):
+                    elementNodesArrayUnsorted = np.array(plex.getTransitiveClosure(i)[0][-self.nNodes_element:] - self.nElements_global)
+                    # self.elementNodesArray[i] = plex.getTransitiveClosure(i)[0][-self.nNodes_element:] - self.nElements_global
+                    self.elementMaterialTypes = np.append(self.elementMaterialTypes, plex.getLabelValue('marker', i))
+                    # Adjust the ordering of faces to match the Proteus convention. 
+                    
+                    # print("elementNodesArrayUnsorted", elementNodesArrayUnsorted)
+                    self.elementBoundariesArray[i] = plex.getCone(i) - (self.nNodes_global + self.nElements_global)
+                    elementNodeList = []
+                    elementBoundaryNodesArrayTemp = np.empty((self.nElementBoundaries_element, self.nNodes_elementBoundary), dtype=np.int32)
+                    j=0
+                    for face in plex.getCone(i):
+                        elementBoundaryNodesArrayTemp[j] = plex.getTransitiveClosure(face)[0][- self.nNodes_elementBoundary:] - self.nElements_global
+                        # print(face, elementBoundaryNodesArrayTemp[j])
+                        mask = np.where(~np.isin(elementNodesArrayUnsorted, elementBoundaryNodesArrayTemp[j]))[0]
+                        index = int(elementNodesArrayUnsorted[mask])
+                        # print(mask, index)
+                        elementNodeList.append(index)
+                        j += 1
+                    # print("elementNodeList", elementNodeList)
+                    self.elementNodesArray[i] = np.array(elementNodeList, dtype=np.int32)
+                    
+                
+                # Loop over each face to get the transitive closure and get the nodes
+                # self.elementBoundaryNodesArray = np.empty((self.nElementBoundaries_global, self.nNodes_elementBoundary), dtype=np.int32)
+                # self.elementBoundaryMaterialTypes = np.array([], dtype=np.int32)
+                # for i in np.arange(fStart, fEnd):
+                    # self.elementBoundaryMaterialTypes = np.append(self.elementBoundaryMaterialTypes, plex.getCellTypeLabel().getValue(i))
+                    # self.elementBoundaryNodesArray[i - fStart] = plex.getTransitiveClosure(i)[0][- self.nNodes_elementBoundary:]  - self.nElements_global
+                
+                # loop over faces to get the support. Add -1 as a second entry for the boundary faces.
+                self.elementBoundaryElementsArray = np.empty((self.nElementBoundaries_global, 2), dtype=np.int32)
+                self.interiorElementBoundariesArray = np.array([], dtype=np.int32)
+                self.exteriorElementBoundariesArray = np.array([], dtype=np.int32)
+                self.elementBoundaryMaterialTypes = np.array([], dtype=np.int32)
+                logEvent("Loop 3")
+                for i in np.arange(fStart, fEnd):
+                    self.elementBoundaryMaterialTypes = np.append(self.elementBoundaryMaterialTypes, plex.getLabelValue('marker', i))
+                    if np.size(plex.getSupport(i)) == 1:
+                        self.elementBoundaryElementsArray[i - fStart] = np.insert(plex.getSupport(i), 1, -1)
+                        self.exteriorElementBoundariesArray = np.concatenate((self.exteriorElementBoundariesArray, np.array([i - fStart])))
+                    else:
+                        self.elementBoundaryElementsArray[i - fStart] = plex.getSupport(i)
+                        self.interiorElementBoundariesArray = np.concatenate((self.interiorElementBoundariesArray, np.array([i - fStart])))
+                
+                self.nInteriorElementBoundaries_global = np.size(self.interiorElementBoundariesArray)
+                self.nExteriorElementBoundaries_global = np.size(self.exteriorElementBoundariesArray)
+                
+                # Get the cone of each edge to get the list of nodes 
+                self.edgeNodesArray = np.empty((self.nEdges_global, 2), dtype=np.int32)
+                logEvent("Loop 4")
+                for i in np.arange(eStart, eEnd):
+                    self.edgeNodesArray[i - eStart] = plex.getCone(i) - self.nElements_global
+                
+                
+                self.elementNeighborsArray = np.empty((self.nElements_global, self.nElementBoundaries_global), dtype=np.int32)
+                
+                logEvent("Done generating mesh from DMPlex")
+
+                # ToDo stuff
+                self.h = 0.0
+                self.hMin = 0.0
+                self.sigmaMax = 0.0
+                self.volume   = 0.0
+            else:
+                pass
         
-        # bcast data to all processes
-        self.nElements_global = comm.bcast(self.nElements_global, root=0)
-        self.nNodes_global = comm.bcast(self.nNodes_global, root=0)
-        self.nNodes_element = comm.bcast(self.nNodes_element, root=0)
-        self.elementNodesArray = comm.bcast(self.elementNodesArray, root=0)
-        self.nodeMaterialTypes = comm.bcast(self.nodeMaterialTypes, root=0)
-        self.nodeArray = comm.bcast(self.nodeArray, root=0)
-        
-        self.nNodes_elementBoundary = comm.bcast(self.nNodes_elementBoundary, root=0)
-        self.nEdges_global = comm.bcast(self.nEdges_global, root=0)
-        self.nElementBoundaries_element = comm.bcast(self.nElementBoundaries_element, root=0)
-        self.nElementBoundaries_global = comm.bcast(self.nElementBoundaries_global, root=0)
-        self.nInteriorElementBoundaries_global = comm.bcast(self.nInteriorElementBoundaries_global, root=0)
-        self.nExteriorElementBoundaries_global = comm.bcast(self.nExteriorElementBoundaries_global, root=0)
-        self.max_nNodeNeighbors_node = comm.bcast(self.max_nNodeNeighbors_node, root=0)
-        # self.max_nElements_node = comm.bcast(self.max_nElements_node, root=0)
-        
-        self.nodeElementsArray = comm.bcast(self.nodeElementsArray, root=0)
-        self.nodeElementOffsets = comm.bcast(self.nodeElementOffsets, root=0)
-        self.elementBoundariesArray = comm.bcast(self.elementBoundariesArray, root=0)
-        self.elementBoundaryNodesArray = comm.bcast(self.elementBoundaryNodesArray, root=0)
-        self.elementBoundaryElementsArray = comm.bcast(self.elementBoundaryElementsArray, root=0)
-        self.interiorElementBoundariesArray = comm.bcast(self.interiorElementBoundariesArray, root=0)
-        self.exteriorElementBoundariesArray = comm.bcast(self.exteriorElementBoundariesArray, root=0)
-        self.edgeNodesArray = comm.bcast(self.edgeNodesArray, root=0)
-        self.nodeStarArray = comm.bcast(self.nodeStarArray, root=0)
-        self.nodeStarOffsets = comm.bcast(self.nodeStarOffsets, root=0)
-        
-        
-        self.elementMaterialTypes = comm.bcast(self.elementMaterialTypes, root=0)
-        self.elementBoundaryMaterialTypes = comm.bcast(self.elementBoundaryMaterialTypes, root=0)
-        
-        # self.h = comm.bcast(self.h, root=0)
-        # self.hMin = comm.bcast(self.hMin, root=0)
-        # self.sigmaMax = comm.bcast(self.sigmaMax, root=0)
-        # self.volume = comm.bcast(self.volume, root=0)
-        comm.barrier()
-        logEvent("Passing DMPlex to cMeshTools to generate CMesh")
-        from . import cmeshTools
-        self.cmesh = cmeshTools.CMesh()
-        self.buildCMeshFromPlex(self.cmesh)
-    
-        
+            # bcast data to all processes
+            self.nElements_global = comm.bcast(self.nElements_global, root=0)
+            self.nNodes_global = comm.bcast(self.nNodes_global, root=0)
+            self.nNodes_element = comm.bcast(self.nNodes_element, root=0)
+            self.elementNodesArray = comm.bcast(self.elementNodesArray, root=0)
+            self.nodeMaterialTypes = comm.bcast(self.nodeMaterialTypes, root=0)
+            self.nodeArray = comm.bcast(self.nodeArray, root=0)
+            
+            self.nNodes_elementBoundary = comm.bcast(self.nNodes_elementBoundary, root=0)
+            self.nEdges_global = comm.bcast(self.nEdges_global, root=0)
+            self.nElementBoundaries_element = comm.bcast(self.nElementBoundaries_element, root=0)
+            self.nElementBoundaries_global = comm.bcast(self.nElementBoundaries_global, root=0)
+            self.nInteriorElementBoundaries_global = comm.bcast(self.nInteriorElementBoundaries_global, root=0)
+            self.nExteriorElementBoundaries_global = comm.bcast(self.nExteriorElementBoundaries_global, root=0)
+            self.max_nNodeNeighbors_node = comm.bcast(self.max_nNodeNeighbors_node, root=0)
+            # self.max_nElements_node = comm.bcast(self.max_nElements_node, root=0)
+            
+            self.nodeElementsArray = comm.bcast(self.nodeElementsArray, root=0)
+            self.nodeElementOffsets = comm.bcast(self.nodeElementOffsets, root=0)
+            self.elementBoundariesArray = comm.bcast(self.elementBoundariesArray, root=0)
+            self.elementBoundaryNodesArray = comm.bcast(self.elementBoundaryNodesArray, root=0)
+            self.elementBoundaryElementsArray = comm.bcast(self.elementBoundaryElementsArray, root=0)
+            self.interiorElementBoundariesArray = comm.bcast(self.interiorElementBoundariesArray, root=0)
+            self.exteriorElementBoundariesArray = comm.bcast(self.exteriorElementBoundariesArray, root=0)
+            self.edgeNodesArray = comm.bcast(self.edgeNodesArray, root=0)
+            self.nodeStarArray = comm.bcast(self.nodeStarArray, root=0)
+            self.nodeStarOffsets = comm.bcast(self.nodeStarOffsets, root=0)
+            
+            
+            self.elementMaterialTypes = comm.bcast(self.elementMaterialTypes, root=0)
+            self.elementBoundaryMaterialTypes = comm.bcast(self.elementBoundaryMaterialTypes, root=0)
+            
+            # self.h = comm.bcast(self.h, root=0)
+            # self.hMin = comm.bcast(self.hMin, root=0)
+            # self.sigmaMax = comm.bcast(self.sigmaMax, root=0)
+            # self.volume = comm.bcast(self.volume, root=0)
+            comm.barrier()
+            logEvent("Passing DMPlex to cMeshTools to generate CMesh")
+            from . import cmeshTools
+            self.cmesh = cmeshTools.CMesh()
+            self.buildCMeshFromPlex(self.cmesh)
         
     def generateFromTetgenFiles(self,filebase,base,skipGeometricInit=False,parallel=False):
         from . import cmeshTools
@@ -3934,7 +4217,9 @@ class MultilevelTetrahedralMesh(MultilevelMesh):
         self.meshList = []
         self.elementParents = None
         self.cmultilevelMesh = None
-        if self.useC:
+        if mesh0.plexMesh:
+            self.meshList.append(mesh0)
+        elif self.useC:
             self.meshList.append(mesh0)
             logEvent("cmeshTools.CMultilevelMesh")
             self.cmultilevelMesh = cmeshTools.CMultilevelMesh(self.meshList[0].cmesh,refinementLevels)
@@ -3959,8 +4244,8 @@ class MultilevelTetrahedralMesh(MultilevelMesh):
                 self.refine()
                 self.meshList[l].subdomainMesh = self.meshList[l]
                 logEvent(self.meshList[-1].meshInfo())
-            self.buildArrayLists()
-
+            self.buildArrayLists()    
+    
     def generatePartitionedMeshFromPUMI(self,mesh0,refinementLevels,nLayersOfOverlap=1):
         from . import cmeshTools
         self.meshList = []
@@ -7485,24 +7770,17 @@ def _generateMesh(domain,meshOptions,generatePartitionedMeshFromFiles=False):
         mlMesh = MultilevelTetrahedralMesh(0, 0,0,skipInit=True,
                                            nLayersOfOverlap=meshOptions.nLayersOfOverlapForParallel,
                                            parallelPartitioningType=meshOptions.parallelPartitioningType)
-        if generatePartitionedMeshFromFiles:
-            logEvent("Generating partitioned mesh from Tetgen files")
-            if("f" not in meshOptions.triangleOptions or "ee" not in meshOptions.triangleOptions):
-                sys.exit("ERROR: Remake the mesh with the `f` flag and `ee` flags in triangleOptions.")
-            mlMesh.generatePartitionedMeshFromTetgenFiles(fileprefix, nbase,mesh,meshOptions.nLevels,
-                                                          nLayersOfOverlap=meshOptions.nLayersOfOverlapForParallel,
-                                                          parallelPartitioningType=meshOptions.parallelPartitioningType)
-        else:
-            logEvent("Generating coarse global mesh from Plex")
-            # mesh.generateFromTetgenFiles(fileprefix, nbase,parallel = comm.size() > 1)
-            # generate using Plex
-            mesh.generateFromPlex(domain.plex)
-            logEvent("Generating partitioned %i-level mesh from Plex mesh" % (meshOptions.nLevels,))
-            # generate from Existing plex and ask DM to do refinement process? or ask CMesh to do it? 
-            # mlMesh.generatePartitionedMeshFromPlex(mesh, meshOptions.nLevels)
-            mlMesh.generateFromExistingCoarseMesh(mesh, meshOptions.nLevels,
-                                                  nLayersOfOverlap=meshOptions.nLayersOfOverlapForParallel,
-                                                  parallelPartitioningType=meshOptions.parallelPartitioningType)
+        
+        logEvent("Generating coarse global mesh from Plex")
+        # generate using Plex
+        # mesh.generateFromPlex(domain.plex, parallel = comm.size() > 1)
+        mesh.partitionMeshFromDMPlex(domain.plex)
+        logEvent("Generating partitioned %i-level mesh from Plex mesh" % (meshOptions.nLevels,))
+        # generate from Existing plex and ask DM to do refinement process? or ask CMesh to do it? 
+        # mlMesh.generatePartitionedMeshFromPlex(mesh, meshOptions.nLevels)
+        mlMesh.generateFromExistingCoarseMesh(mesh, meshOptions.nLevels,
+                                                nLayersOfOverlap=meshOptions.nLayersOfOverlapForParallel,
+                                                parallelPartitioningType=meshOptions.parallelPartitioningType)
 
     meshOptions.genMesh = False
     return mlMesh
