@@ -807,7 +807,7 @@ class Mesh(object):
             innerDiameter = 6.0 * volume / area
             self.subdomainMesh.elementInnerDiametersArray[i] = innerDiameter
             
-            self.subdomainMesh.elementNodesArray[i] = elementNodes
+            self.subdomainMesh.elementNodesArray[i] = elementNodes[::-1]
             # self.subdomainMesh.elementNodesArray[i] = np.array(elementNodeList, dtype=np.int32)
             self.subdomainMesh.elementBarycentersArray[i] = plex.computeCellGeometryFVM(i)[1]
             # self.subdomainMesh.elementBarycentersArray[i] = np.sum([self.subdomainMesh.nodeArray[n] for n in elementNodeList], axis=0) / self.subdomainMesh.nNodes_element
@@ -859,14 +859,18 @@ class Mesh(object):
             
             if np.size(plex.getSupport(i)) == 1:
                 self.subdomainMesh.elementBoundaryElementsArray[i - fStart] = np.insert(plex.getSupport(i), 1, -1)
-                self.subdomainMesh.exteriorElementBoundariesArray = np.concatenate((self.subdomainMesh.exteriorElementBoundariesArray, np.array([i - fStart])))
-                self.subdomainMesh.elementBoundaryLocalElementBoundariesArray[i - fStart] = np.insert(np.argmax(i == plex.getCone(plex.getSupport(i))), 1, -1)
+                self.subdomainMesh.exteriorElementBoundariesArray = np.concatenate((self.subdomainMesh.exteriorElementBoundariesArray, np.array([i - fStart])),dtype=np.int32)
+                leftLocalBd = int(np.where(~np.isin(self.subdomainMesh.elementNodesArray[plex.getSupport(i)[0]], self.subdomainMesh.elementBoundaryNodesArray[i-fStart]))[0])
+                self.subdomainMesh.elementBoundaryLocalElementBoundariesArray[i - fStart] = np.array([leftLocalBd, -1], dtype=np.int32)
             else:
                 self.subdomainMesh.elementBoundaryElementsArray[i - fStart] = plex.getSupport(i)
                 self.subdomainMesh.interiorElementBoundariesArray = np.concatenate((self.subdomainMesh.interiorElementBoundariesArray, np.array([i - fStart])))
-                self.subdomainMesh.elementBoundaryLocalElementBoundariesArray[i - fStart][0] = np.argmax(i == plex.getCone(plex.getSupport(i)[0]))
-                self.subdomainMesh.elementBoundaryLocalElementBoundariesArray[i - fStart][1] = np.argmax(i == plex.getCone(plex.getSupport(i)[1]))
-        
+                # Compare the nodes from elementBoundary and elementNodeaArray to get local element boundary number
+                leftLocalBd = int(np.where(~np.isin(self.subdomainMesh.elementNodesArray[plex.getSupport(i)[0]], self.subdomainMesh.elementBoundaryNodesArray[i-fStart]))[0])
+                rightLocalBd = int(np.where(~np.isin(self.subdomainMesh.elementNodesArray[plex.getSupport(i)[1]], self.subdomainMesh.elementBoundaryNodesArray[i-fStart]))[0])
+                self.subdomainMesh.elementBoundaryLocalElementBoundariesArray[i - fStart][0] = leftLocalBd
+                self.subdomainMesh.elementBoundaryLocalElementBoundariesArray[i - fStart][1] = rightLocalBd
+                        
         self.subdomainMesh.nInteriorElementBoundaries_global = np.size(self.subdomainMesh.interiorElementBoundariesArray)
         self.subdomainMesh.nExteriorElementBoundaries_global = np.size(self.subdomainMesh.exteriorElementBoundariesArray)
         
@@ -884,11 +888,6 @@ class Mesh(object):
             # else:
             #     self.subdomainMesh.nodeMaterialTypes[i - nStart] = plex.getLabelValue('marker', i)
             
-            match self.subdomainMesh.nodeArray[i - nStart][0]:
-                case 0.0:
-                    self.subdomainMesh.nodeMaterialTypes[i - nStart] = 5
-                case 1.0:
-                    self.subdomainMesh.nodeMaterialTypes[i - nStart] = 3
             match self.subdomainMesh.nodeArray[i - nStart][1]:
                 case 0.0:
                     self.subdomainMesh.nodeMaterialTypes[i - nStart] = 1
@@ -899,6 +898,11 @@ class Mesh(object):
                     self.subdomainMesh.nodeMaterialTypes[i - nStart] = 2
                 case 1.0:
                     self.subdomainMesh.nodeMaterialTypes[i - nStart] = 4
+            match self.subdomainMesh.nodeArray[i - nStart][0]:
+                case 0.0:
+                    self.subdomainMesh.nodeMaterialTypes[i - nStart] = 5
+                case 1.0:
+                    self.subdomainMesh.nodeMaterialTypes[i - nStart] = 3
             nAdjacentNodes = int(sum((plex.getAdjacency(i)<nEnd) &  (plex.getAdjacency(i)>=nStart)) - 1)
             
             # Update max_nNodeNeighbors_node

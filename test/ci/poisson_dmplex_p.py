@@ -31,6 +31,24 @@ f = 4 * pi^2 * sin(2 * pi * x[d]); d in [0, nDimensions-1]
 # -dm_plex_dim 3 -dm_refine_pre 2 -dm_view ascii -dm_plex_separate_marker 1 -dm_distribute 1 -ksp_type cg -pc_type gamg
 
 name = "poisson_plex"
+# coords = numpy.asarray([[0., 0., 0.],
+#        [1., 0., 0.],
+#        [1., 1., 0.],
+#        [0., 1., 0.],
+#        [0., 0., 1.],
+#        [1., 0., 1.],
+#        [1., 1., 1.],
+#        [0., 1., 1.]])
+
+# cells = np.asarray([[6, 0, 4, 7],
+#        [6, 0, 7, 2],
+#        [5, 0, 6, 1],
+#        [0, 6, 1, 2],
+#        [0, 7, 2, 3],
+#        [5, 0, 4, 6]], dtype='int32')
+# nd = 3
+
+# plexMesh = PETSc.DMPlex().createFromCellList(nd,cells,coords)
 plexMesh = PETSc.DMPlex()
 plexMesh.create(comm.comm)
 plexMesh.setFromOptions()
@@ -113,13 +131,13 @@ class u5Ex(object):
         pass
     def uOfX(self,x):
         return numpy.sin(2.0 * numpy.pi * x[0]) + numpy.sin(2.0 * numpy.pi * x[1]) + numpy.sin(2.0 * numpy.pi * x[2])
-    def uOfXT(self,X,T):
-        return self.uOfX(X)
-    def duOfX(self,X):
-        du = 2.0*numpy.reshape(X[0:3],(3,))
+    def uOfXT(self,x,T):
+        return self.uOfX(x)
+    def duOfX(self,x):
+        du = 2.0 * numpy.pi *numpy.array([numpy.cos(2.0 * numpy.pi * x[0]) + numpy.cos(2.0 * numpy.pi * x[1]) + numpy.cos(2.0 * numpy.pi * x[2])])
         return du
-    def duOfXT(self,X,T):
-        return self.duOfX(X)
+    def duOfXT(self,x,T):
+        return self.duOfX(x)
 #dirichlet boundary condition functions on (x=0,y,z), (x,y=0,z), (x,y=1,z), (x,y,z=0), (x,y,z=1)
 def getDBC5(x,flag):
     if flag in [boundaryTags['bottom'],boundaryTags['top'],boundaryTags['front'],boundaryTags['back'],boundaryTags['left'], boundaryTags['right']]:
