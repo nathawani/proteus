@@ -15,6 +15,7 @@ cdef extern from *:
     ctypedef int nP1T "1"
     ctypedef int nP2T "2"
     ctypedef int nP3T "3"
+    ctypedef int nP4T "4"
     ctypedef int nQT "50"
     ctypedef int nEBQT "50"
 #nQ=50 will provide enough space for testing most quadrature rules
@@ -122,3 +123,22 @@ cdef class Simplex:
     @property
     def D(self):
         return self._D[self.q]
+
+def calc_edge_H(double phi0, double phi1, int nP):
+    """Edge-restricted moment-fit Heaviside on a cut edge (reference t in [0,1] from the edge's
+    node 0 to node 1). phi0, phi1 must have opposite signs. Returns the monomial coefficients
+    of H_hat in {1, t, ..., t**nP}, fitting the indicator of {phi > 0}."""
+    cdef np.ndarray C_H = np.zeros(nP+1)
+    if nP == 1:   eqp.calculate_edge_H[nP1T](phi0, phi1, <double*>C_H.data)
+    elif nP == 2: eqp.calculate_edge_H[nP2T](phi0, phi1, <double*>C_H.data)
+    elif nP == 3: eqp.calculate_edge_H[nP3T](phi0, phi1, <double*>C_H.data)
+    elif nP == 4: eqp.calculate_edge_H[nP4T](phi0, phi1, <double*>C_H.data)
+    else: raise ValueError("nP must be 1, 2, 3, or 4")
+    return C_H
+
+def eval_edge_poly(np.ndarray C, double t, int nP):
+    if nP == 1:   return eqp.evaluate_edge_poly[nP1T](<double*>C.data, t)
+    elif nP == 2: return eqp.evaluate_edge_poly[nP2T](<double*>C.data, t)
+    elif nP == 3: return eqp.evaluate_edge_poly[nP3T](<double*>C.data, t)
+    elif nP == 4: return eqp.evaluate_edge_poly[nP4T](<double*>C.data, t)
+    else: raise ValueError("nP must be 1, 2, 3, or 4")
