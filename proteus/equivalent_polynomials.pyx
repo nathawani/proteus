@@ -10,8 +10,11 @@ cdef extern from *:
     ctypedef int nSpace1T "1"
     ctypedef int nSpace2T "2"
     ctypedef int nSpace3T "3"
-    ctypedef int nP_ifem1T "1"
-    # ctypedef int nP_ifem2T "2"
+    # nP_ifem is the number of two-sided IFEM basis functions.
+    # Simplex::_calculate_coefficients implements case 3 (P1) and case 6 (P2)
+    # only; any other value falls through to a runtime_error, which used to
+    # abort every call made through this test binding.
+    ctypedef int nP_ifem1T "3"
     ctypedef int nP1T "1"
     ctypedef int nP2T "2"
     ctypedef int nP3T "3"
