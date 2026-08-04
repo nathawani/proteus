@@ -14,7 +14,6 @@
 
 namespace equivalent_polynomials
 {
-
   template <int nSpace, int nP_ifem, int nP, int nQ, int nEBQ>
   class Regularized
   {
