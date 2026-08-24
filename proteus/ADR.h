@@ -17,7 +17,7 @@ namespace py = pybind11;
 namespace proteus
 {
 	template <int nSpace, int nP_ifem, int nP, int nQ, int nEBQ>
-	using GeneralizedFunctions = equivalent_polynomials::GeneralizedFunctions_mix<nSpace, nP_ifem, nP, nQ, nEBQ>;
+	using GeneralizedFunctions = equivalent_polynomials::GeneralizedFunctions_mix<nSpace, nP_ifem, nP, nQ, nEBQ, true>;
 
 	class cADR_base
 	{
