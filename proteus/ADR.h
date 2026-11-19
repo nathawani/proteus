@@ -92,71 +92,6 @@ namespace proteus
 		cADR() : nDOF_test_X_trial_element(nDOF_test_element * nDOF_trial_element), ck()
 		{
 		}
-		// 3D SCIFEM: moment-fit weights of the two branches on a triangular face that Gamma_f cuts.
-		// H = weight of branch b (phi_f > 0), ImH = weight of branch a (phi_f < 0), at the face quadrature points
-		// of side 0 (physical positions xq0), exact for polynomials of degree <= nP_edge. The fit is the 2D
-		// equivalent polynomial on the reference triangle: the face's three vertex values of phi_f and the
-		// barycentric coordinates of each quadrature point in the face (side 0's vertex order) are all it needs,
-		// because the map from the reference triangle to the face is affine and the physical weights carry the
-		// face area through dS. Face k of a tetrahedron is opposite local node k; its vertices are the other three.
-		inline void cutFaceWeights(const proteus_index_t eN0, const int ebN_local0, const double (*xq0)[3],
-								   const proteus_index_t *u_l2g, const double *mesh_dof, const double *phi_nodes,
-								   double *H, double *ImH)
-		{
-			if constexpr (nSpace == 3)
-			{
-				double P[3][3], phi3[3];
-				for (int m = 0; m < 3; m++)
-				{
-					const int ln = (m < ebN_local0) ? m : m + 1;
-					const proteus_index_t dof = u_l2g[eN0 * nDOF_trial_element + ln];
-					phi3[m] = phi_nodes[dof];
-					for (int I = 0; I < 3; I++)
-						P[m][I] = mesh_dof[dof * 3 + I];
-				}
-				double v0[3], v1[3];
-				for (int I = 0; I < 3; I++)
-				{
-					v0[I] = P[1][I] - P[0][I];
-					v1[I] = P[2][I] - P[0][I];
-				}
-				const double d00 = v0[0] * v0[0] + v0[1] * v0[1] + v0[2] * v0[2], d01 = v0[0] * v1[0] + v0[1] * v1[1] + v0[2] * v1[2],
-							 d11 = v1[0] * v1[0] + v1[1] * v1[1] + v1[2] * v1[2];
-				const double den = d00 * d11 - d01 * d01;
-				double xi[nQuadraturePoints_elementBoundary * 3];
-				for (int k = 0; k < nQuadraturePoints_elementBoundary; k++)
-				{
-					double v2[3];
-					for (int I = 0; I < 3; I++)
-						v2[I] = xq0[k][I] - P[0][I];
-					const double d20 = v2[0] * v0[0] + v2[1] * v0[1] + v2[2] * v0[2], d21 = v2[0] * v1[0] + v2[1] * v1[1] + v2[2] * v1[2];
-					xi[k * 3 + 0] = (d11 * d20 - d01 * d21) / den;
-					xi[k * 3 + 1] = (d00 * d21 - d01 * d20) / den;
-					xi[k * 3 + 2] = 0.0;
-				}
-				static const double ref_nodes[9] = {0., 0., 0., 1., 0., 0., 0., 1., 0.};
-				const int icase = face_gf.calculate(phi3, ref_nodes, xi, false);
-				for (int k = 0; k < nQuadraturePoints_elementBoundary; k++)
-				{
-					if (icase == 1)
-					{
-						H[k] = 1.0;
-						ImH[k] = 0.0;
-					}
-					else if (icase == -1)
-					{
-						H[k] = 0.0;
-						ImH[k] = 1.0;
-					}
-					else
-					{
-						face_gf.set_quad(k);
-						H[k] = face_gf.H(0., 0.);
-						ImH[k] = face_gf.ImH(0., 0.);
-					}
-				}
-			}
-		}
 		// Build (or reuse) the geometry of the cuts. Called first by the residual and by the Jacobian, so neither depends on
 		// the other having run.
 		inline void prepareGeometry(arguments_dict &args, const bool curved)
@@ -661,57 +596,6 @@ namespace proteus
 					}
 				}
 			}
-		}
-
-		// The weights of the two branches on the cut face of a SCIFEM face, at side 0's quadrature points xq0: H = branch b
-		// (phi_f > 0), ImH = branch a. The facet integrand is DISCONTINUOUS at the interface crossing, so a fixed whole-face
-		// Gauss rule cannot integrate it directly: the two one-sided integrands are weighted by a moment-fit Heaviside
-		// instead, exact for any polynomial integrand of degree <= nP_edge (P1: <= 1, P2: <= 3 for the consistency terms,
-		// 2p for the penalty) -- no linearity assumption, unlike a split-quadrature scheme. ONE fit per face, in side 0's
-		// parametrization: the two sides' fits are mirror images, moment-equivalent but not pointwise equal, so they must not
-		// be mixed. Each branch is intersected with the fluid side {phi_s > 0} (phi_s is 1 without an embedded solid, so this
-		// is then exactly the single Gamma_f fit and its complement). 2D: the edge fit along the edge; 3D: the 2D Heaviside
-		// fit on the cut triangle (cutFaceWeights).
-		inline void faceCutWeights(const unfitted::FaceMesh &c, const proteus_index_t ebN, const double (*xq0)[3], double *ImH_e, double *H_e)
-		{
-			const proteus_index_t eN0 = c.eb_elements[ebN * 2];
-			const int ebN_local0 = c.eb_local[ebN * 2];
-			if constexpr (nSpace == 2)
-			{
-				const int n0l = (ebN_local0 + 1) % 3, n1l = (ebN_local0 + 2) % 3;
-				const int ln[2] = {n0l, n1l};
-				double edge_nodes[2][3] = {}, phi_edge[2] = {}, phi_s_edge[2] = {};
-				for (int e = 0; e < 2; e++)
-				{
-					const proteus_index_t dof = c.u_l2g[eN0 * nDOF_trial_element + ln[e]];
-					phi_edge[e] = c.phi_f_nodes[dof];
-					phi_s_edge[e] = c.embedded ? c.phi_s_nodes[dof] : 1.0;
-					for (int I = 0; I < 3; I++)
-						edge_nodes[e][I] = c.mesh_dof[dof * 3 + I];
-				}
-				double edge_vec[3];
-				double edge_len2 = 0.0;
-				for (int I = 0; I < 3; I++)
-				{
-					edge_vec[I] = edge_nodes[1][I] - edge_nodes[0][I];
-					edge_len2 += edge_vec[I] * edge_vec[I];
-				}
-				double C_a_edge[nP_edge + 1], C_b_edge[nP_edge + 1];
-				equivalent_polynomials::calculate_edge_interval_H<nP_edge>(-phi_edge[0], -phi_edge[1], phi_s_edge[0], phi_s_edge[1], C_a_edge);
-				equivalent_polynomials::calculate_edge_interval_H<nP_edge>(phi_edge[0], phi_edge[1], phi_s_edge[0], phi_s_edge[1], C_b_edge);
-				for (int k = 0; k < nQuadraturePoints_elementBoundary; k++)
-				{
-					// t of this physical point along side 0's edge direction, then H_hat(t)
-					double proj = 0.0;
-					for (int I = 0; I < 3; I++)
-						proj += (xq0[k][I] - edge_nodes[0][I]) * edge_vec[I];
-					const double t_edge = (edge_len2 > 1.0e-24) ? (proj / edge_len2) : 0.0;
-					H_e[k] = equivalent_polynomials::evaluate_edge_poly<nP_edge>(C_b_edge, t_edge);
-					ImH_e[k] = equivalent_polynomials::evaluate_edge_poly<nP_edge>(C_a_edge, t_edge);
-				}
-			}
-			else
-				cutFaceWeights(eN0, ebN_local0, xq0, c.u_l2g, c.mesh_dof, c.phi_f_nodes, H_e, ImH_e);
 		}
 
 		// SCIFEM (Ji et al. 2014, eq. 3.7/3.8) at one quadrature point of a face Gamma_f cuts: the two-sided basis of both
@@ -1578,7 +1462,7 @@ namespace proteus
 			// C44 phase 2, P1: the two-sided IFEM basis and the flux-jump lift on P1 tetrahedra
 			if (immersed && pOrder != 1)
 				need("immersedBoundary with P2 (the two-sided P2 basis on tetrahedra)", 2);
-			// SCIFEM on triangular faces of P1 tetrahedra is implemented (cutFaceWeights); P2 is refused above
+			// SCIFEM on triangular faces of P1 tetrahedra is implemented (unfitted::cutFaceWeights); P2 is refused above
 			(void)scifem_switch;
 			(void)scifem_penalty;
 			if (PG)
@@ -1959,7 +1843,7 @@ namespace proteus
 					double xq[2][nQuadraturePoints_elementBoundary][3];
 					unfitted::pairFacePoints<nSpace, nQuadraturePoints_elementBoundary>(ck, fctx, ebN, kmap, xq, h_edge, true);
 					double H_e[nQuadraturePoints_elementBoundary], ImH_e[nQuadraturePoints_elementBoundary];
-					faceCutWeights(fctx, ebN, xq[0], ImH_e, H_e);
+					unfitted::faceCutWeights<nSpace, nDOF_trial_element, nQuadraturePoints_elementBoundary, nP_edge>(face_gf, fctx, ebN, xq[0], ImH_e, H_e);
 					for (int k = 0; k < nQuadraturePoints_elementBoundary; k++)
 					{
 						ScifemPoint sp;
@@ -2909,7 +2793,7 @@ namespace proteus
 					double xq[2][nQuadraturePoints_elementBoundary][3];
 					unfitted::pairFacePoints<nSpace, nQuadraturePoints_elementBoundary>(ck, fctx, ebN, kmap, xq, h_edge, true);
 					double H_e[nQuadraturePoints_elementBoundary], ImH_e[nQuadraturePoints_elementBoundary];
-					faceCutWeights(fctx, ebN, xq[0], ImH_e, H_e);
+					unfitted::faceCutWeights<nSpace, nDOF_trial_element, nQuadraturePoints_elementBoundary, nP_edge>(face_gf, fctx, ebN, xq[0], ImH_e, H_e);
 					for (int k = 0; k < nQuadraturePoints_elementBoundary; k++)
 					{
 						ScifemPoint sp;
