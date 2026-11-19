@@ -506,18 +506,10 @@ namespace proteus
 		}
 
 		// ---- face terms ---------------------------------------------------------------------------------------------------
-		// What the face terms (ghost penalty, SCIFEM, triply-cut edge) read about the mesh, as plain pointers.
-		struct FaceCtx
+		// What the face terms (ghost penalty, SCIFEM, triply-cut edge) read about the mesh (see unfitted::FaceMesh).
+		inline unfitted::FaceMesh makeFaceCtx(arguments_dict &args)
 		{
-			double *mesh_dof, *mesh_trial_trace_ref, *mesh_grad_trial_trace_ref, *boundaryJac_ref, *normal_ref, *dS_ref,
-				*u_grad_trial_trace_ref, *u_dof, *phi_f_nodes, *phi_s_nodes, *jump_nodes;
-			proteus_index_t *mesh_l2g, *u_l2g, *eb_elements;
-			int *eb_local;
-			bool immersed, embedded;
-		};
-		inline FaceCtx makeFaceCtx(arguments_dict &args)
-		{
-			FaceCtx c;
+			unfitted::FaceMesh c;
 			c.mesh_dof = args.array<double>("mesh_dof").data();
 			c.mesh_trial_trace_ref = args.array<double>("mesh_trial_trace_ref").data();
 			c.mesh_grad_trial_trace_ref = args.array<double>("mesh_grad_trial_trace_ref").data();
@@ -538,72 +530,6 @@ namespace proteus
 			return c;
 		}
 
-		// The two elements sharing an interior face do NOT necessarily parametrize it in the same direction, so
-		// quadrature index kb can denote DIFFERENT physical points on the two sides (measured: 4 of 14 cut edges at
-		// test=8.0/refinement=1, with exactly the mirror offsets |1-2t_k|*L of the Gauss rule). Pairing the sides by raw kb
-		// then differences u at two different points, so [[u]] and {{beta grad u}} pick up u's variation ALONG the face
-		// instead of the genuine inter-element jump. kmap[s][k] is side s's index for the physical point that side 0 calls
-		// k, matched by position (no assumption about the rule being symmetric or ascending); xq are the physical points
-		// of both sides. Match over nSpace components only: a component the mapping does not define contributes nothing
-		// but noise to the distance. With strict, the pairing is verified (the winning distance is 0 and the runner-up is
-		// a full quadrature spacing away) and a failure throws: a mis-pick silently differences u at two different points,
-		// and assert() is compiled out by the -DNDEBUG that reaches these translation units. Without it the nearest point
-		// is taken (the ghost penalty's pairing).
-		inline void pairFacePoints(const FaceCtx &c, const proteus_index_t ebN, int kmap[2][nQuadraturePoints_elementBoundary],
-								   double xq[2][nQuadraturePoints_elementBoundary][3], const double h_edge, const bool strict)
-		{
-			for (int s = 0; s < 2; s++)
-			{
-				const proteus_index_t eN_g = c.eb_elements[ebN * 2 + s];
-				const int ebN_local_g = c.eb_local[ebN * 2 + s];
-				for (int kb = 0; kb < nQuadraturePoints_elementBoundary; kb++)
-				{
-					double jac_g[nSpace * nSpace], jacDet_g, jacInv_g[nSpace * nSpace],
-						bJac_g[nSpace * (nSpace - 1)], mT_g[(nSpace - 1) * (nSpace - 1)], mTDS_g, nrm_g[3], xt = 0.0, yt = 0.0, zt = 0.0;
-					ck.calculateMapping_elementBoundary(eN_g, ebN_local_g, kb, ebN_local_g * nQuadraturePoints_elementBoundary + kb,
-														c.mesh_dof, c.mesh_l2g, c.mesh_trial_trace_ref, c.mesh_grad_trial_trace_ref,
-														c.boundaryJac_ref, jac_g, jacDet_g, jacInv_g, bJac_g, mT_g, mTDS_g, c.normal_ref, nrm_g,
-														xt, yt, zt);
-					xq[s][kb][0] = xt;
-					xq[s][kb][1] = yt;
-					xq[s][kb][2] = zt;
-				}
-			}
-			bool used[nQuadraturePoints_elementBoundary] = {};
-			for (int k = 0; k < nQuadraturePoints_elementBoundary; k++)
-			{
-				kmap[0][k] = k;
-				int best = strict ? -1 : 0;
-				double bestd = 1.0e300, nextd = 1.0e300;
-				for (int j = 0; j < nQuadraturePoints_elementBoundary; j++)
-				{
-					double d = 0.0;
-					for (int I = 0; I < nSpace; I++)
-						d += std::fabs(xq[1][j][I] - xq[0][k][I]);
-					if (d < bestd)
-					{
-						nextd = bestd;
-						bestd = d;
-						best = j;
-					}
-					else if (d < nextd)
-						nextd = d;
-				}
-				if (strict && (best < 0 || used[best] || bestd >= 1.0e-8 * h_edge || nextd <= 2.0 * bestd))
-				{
-					std::cerr << "ADR immersedSCIFEM: quadrature points on face " << ebN
-							  << " between elements " << c.eb_elements[ebN * 2 + 0] << " and " << c.eb_elements[ebN * 2 + 1]
-							  << " do not pair up (k=" << k << ", best=" << best
-							  << ", d=" << bestd << ", runner-up=" << nextd
-							  << ", h=" << h_edge << "); the mesh is non-conforming or the"
-							  << " boundary mapping is inconsistent." << std::endl;
-					throw std::runtime_error("ADR immersedSCIFEM: face quadrature pairing failed");
-				}
-				used[best] = true;
-				kmap[1][k] = best;
-			}
-		}
-
 		// Ghost penalty at one quadrature point of an interior face of Gamma_s-cut elements, per fluid phase. The penalty
 		// kills *spurious* normal-derivative jumps across a cut element's face. On an element the fluid interface also
 		// cuts, the combined IFEM solution genuinely kinks at Gamma_f, so penalising the combined gradient penalises
@@ -622,7 +548,7 @@ namespace proteus
 			double ju_a = 0.0, ju_b = 0.0, ju_c = 0.0, dS = 0.0;
 			bool okA = true, okB = true;
 		};
-		inline void ghostPoint(const FaceCtx &c, const proteus_index_t ebN, const int kb, const int kb1, const bool withSolution, GhostPoint &gp)
+		inline void ghostPoint(const unfitted::FaceMesh &c, const proteus_index_t ebN, const int kb, const int kb1, const bool withSolution, GhostPoint &gp)
 		{
 			gp.ju_a = gp.ju_b = gp.ju_c = 0.0;
 			gp.okA = gp.okB = true;
@@ -746,7 +672,7 @@ namespace proteus
 		// be mixed. Each branch is intersected with the fluid side {phi_s > 0} (phi_s is 1 without an embedded solid, so this
 		// is then exactly the single Gamma_f fit and its complement). 2D: the edge fit along the edge; 3D: the 2D Heaviside
 		// fit on the cut triangle (cutFaceWeights).
-		inline void faceCutWeights(const FaceCtx &c, const proteus_index_t ebN, const double (*xq0)[3], double *ImH_e, double *H_e)
+		inline void faceCutWeights(const unfitted::FaceMesh &c, const proteus_index_t ebN, const double (*xq0)[3], double *ImH_e, double *H_e)
 		{
 			const proteus_index_t eN0 = c.eb_elements[ebN * 2];
 			const int ebN_local0 = c.eb_local[ebN * 2];
@@ -800,7 +726,7 @@ namespace proteus
 			double jv_a[2 * nDOF_test_element], jv_b[2 * nDOF_test_element], hf_a[2 * nDOF_test_element], hf_b[2 * nDOF_test_element];
 			double avg_flux_a = 0.0, avg_flux_b = 0.0, jump_ua = 0.0, jump_ub = 0.0, dS = 0.0;
 		};
-		inline void scifemPoint(const FaceCtx &c, const proteus_index_t ebN, const int k, const int kmap[2][nQuadraturePoints_elementBoundary],
+		inline void scifemPoint(const unfitted::FaceMesh &c, const proteus_index_t ebN, const int k, const int kmap[2][nQuadraturePoints_elementBoundary],
 								const double mua, const double mub, const bool withSolution, ScifemPoint &p)
 		{
 			double ua_s[2] = {0., 0.}, ub_s[2] = {0., 0.}, flux_a_s[2] = {0., 0.}, flux_b_s[2] = {0., 0.};
@@ -920,7 +846,7 @@ namespace proteus
 		// local DOFs = the element's. With r (and the nodal coefficients of the two branches cuA, cuB, and the flux-jump
 		// lift) the residual is added, with J the Jacobian block (linear in u_dof through the flux only; JA/JB are fixed
 		// data). r and J are local (nDOF, nDOF * nDOF); either may be null.
-		inline void tripleCutEdge(const FaceCtx &c, const proteus_index_t eN, const double *element_phi_f, const double *element_phi_s,
+		inline void tripleCutEdge(const unfitted::FaceMesh &c, const proteus_index_t eN, const double *element_phi_f, const double *element_phi_s,
 								  const double *element_nodes, const proteus_index_t *elementBoundaries, const bool tcFluidMode,
 								  const bool tcBoundaryOnly, const double tcSgn, const double mua, const double mub,
 								  const double *JA, const double *JB, const double fluxLiftJ, double *r, double *J)
@@ -1782,7 +1708,7 @@ namespace proteus
 			// handled by SCIFEM's two-sided consistency term, which has no counterpart on an exterior edge.
 			const bool tcBoundaryOnly = args.scalar<int>("triplyCut_edgeBoundaryOnly");
 			const double tcSgn = tcFluidMode ? -1.0 : 1.0;
-			const FaceCtx tcCtx = makeFaceCtx(args);
+			const unfitted::FaceMesh tcCtx = makeFaceCtx(args);
 
 			//
 			// loop over elements to compute volume integrals and load them into element and global residual
@@ -1984,14 +1910,14 @@ namespace proteus
 			// fluid): gamma_g h_F int_F [[du/dn]] [[dv/dn]], one jump penalty per phase (see ghostPoint) over the local DOFs
 			// of both elements.
 			{
-				const FaceCtx fctx = makeFaceCtx(args);
+				const unfitted::FaceMesh fctx = makeFaceCtx(args);
 				constexpr int n2 = 2 * nDOF_test_element;
 				for (const proteus_index_t ebN : geom.cutfemFaces())
 				{
 					const double gamma_h = embeddedBoundary_ghost_penalty * elementBoundaryDiameter.data()[ebN];
 					int gp_kmap[2][nQuadraturePoints_elementBoundary];
 					double gp_xq[2][nQuadraturePoints_elementBoundary][3];
-					pairFacePoints(fctx, ebN, gp_kmap, gp_xq, elementBoundaryDiameter.data()[ebN], false);
+					unfitted::pairFacePoints<nSpace, nQuadraturePoints_elementBoundary>(ck, fctx, ebN, gp_kmap, gp_xq, elementBoundaryDiameter.data()[ebN], false);
 					for (int kb = 0; kb < nQuadraturePoints_elementBoundary; kb++)
 					{
 						GhostPoint gp;
@@ -2022,7 +1948,7 @@ namespace proteus
 			// by the edge Heaviside fit (see the prologue below), which is what makes this exact for
 			// P1 and P2 without splitting the quadrature.
 			{
-				const FaceCtx fctx = makeFaceCtx(args);
+				const unfitted::FaceMesh fctx = makeFaceCtx(args);
 				constexpr int n2 = 2 * nDOF_test_element;
 				for (const proteus_index_t ebN : geom.ifemFaces())
 				{
@@ -2031,7 +1957,7 @@ namespace proteus
 					const double h_edge = elementBoundaryDiameter.data()[ebN];
 					int kmap[2][nQuadraturePoints_elementBoundary];
 					double xq[2][nQuadraturePoints_elementBoundary][3];
-					pairFacePoints(fctx, ebN, kmap, xq, h_edge, true);
+					unfitted::pairFacePoints<nSpace, nQuadraturePoints_elementBoundary>(ck, fctx, ebN, kmap, xq, h_edge, true);
 					double H_e[nQuadraturePoints_elementBoundary], ImH_e[nQuadraturePoints_elementBoundary];
 					faceCutWeights(fctx, ebN, xq[0], ImH_e, H_e);
 					for (int k = 0; k < nQuadraturePoints_elementBoundary; k++)
@@ -2786,7 +2712,7 @@ namespace proteus
 			// handled by SCIFEM's two-sided consistency term, which has no counterpart on an exterior edge.
 			const bool tcBoundaryOnly = args.scalar<int>("triplyCut_edgeBoundaryOnly");
 			const double tcSgn = tcFluidMode ? -1.0 : 1.0;
-			const FaceCtx tcCtx = makeFaceCtx(args);
+			const unfitted::FaceMesh tcCtx = makeFaceCtx(args);
 			for (proteus_index_t eN = 0; eN < nElements_global; eN++)
 			{
 				// double  elementJacobian_u_u.data()[nDOF_test_element*nDOF_trial_element],element_u[nDOF_trial_element];
@@ -2925,14 +2851,14 @@ namespace proteus
 			// Jacobian of the ghost penalty assembled in calculateResidual: the same jump penalties, over the local DOFs of both
 			// elements, scattered by the face's CSR offsets (everything is linear in u_dof)
 			{
-				const FaceCtx fctx = makeFaceCtx(args);
+				const unfitted::FaceMesh fctx = makeFaceCtx(args);
 				constexpr int n2 = 2 * nDOF_test_element;
 				for (const proteus_index_t ebN : geom.cutfemFaces())
 				{
 					const double gamma_h = embeddedBoundary_ghost_penalty * elementBoundaryDiameter.data()[ebN];
 					int gp_kmap[2][nQuadraturePoints_elementBoundary];
 					double gp_xq[2][nQuadraturePoints_elementBoundary][3];
-					pairFacePoints(fctx, ebN, gp_kmap, gp_xq, elementBoundaryDiameter.data()[ebN], false);
+					unfitted::pairFacePoints<nSpace, nQuadraturePoints_elementBoundary>(ck, fctx, ebN, gp_kmap, gp_xq, elementBoundaryDiameter.data()[ebN], false);
 					for (int kb = 0; kb < nQuadraturePoints_elementBoundary; kb++)
 					{
 						GhostPoint gp;
@@ -2974,14 +2900,14 @@ namespace proteus
 			// d(avg_flux_a)/d(u_dof[s,j]) = 0.5*fta_m[s][j] and d(jump_ua)/d(u_dof[s,j]) =
 			// (+/-)va_m[s][j] -- the same per-dof quantities used for the test index i.
 			{
-				const FaceCtx fctx = makeFaceCtx(args);
+				const unfitted::FaceMesh fctx = makeFaceCtx(args);
 				constexpr int n2 = 2 * nDOF_test_element;
 				for (const proteus_index_t ebN : geom.ifemFaces())
 				{
 					const double h_edge = elementBoundaryDiameter.data()[ebN];
 					int kmap[2][nQuadraturePoints_elementBoundary];
 					double xq[2][nQuadraturePoints_elementBoundary][3];
-					pairFacePoints(fctx, ebN, kmap, xq, h_edge, true);
+					unfitted::pairFacePoints<nSpace, nQuadraturePoints_elementBoundary>(ck, fctx, ebN, kmap, xq, h_edge, true);
 					double H_e[nQuadraturePoints_elementBoundary], ImH_e[nQuadraturePoints_elementBoundary];
 					faceCutWeights(fctx, ebN, xq[0], ImH_e, H_e);
 					for (int k = 0; k < nQuadraturePoints_elementBoundary; k++)
