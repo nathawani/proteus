@@ -10,6 +10,8 @@
 //               equivalent_polynomials.h (MCorr, VOF, RDLS, RANS*) no longer carry its storage.
 //   IFEFunctions  GeneralizedFunctions_mix (moment fits of H, 1-H, D) plus an IFEBasis, calculated and queried together:
 //               the object ADR holds per cut element.
+//   StokesIFEP1 the stabilized P1-P1 immersed element for 2D Stokes interface problems: u, v and p linear on each side,
+//               glued by [u] = J, [sigma n] = j_t, [div u] = 0, [grad p] = 0; shape and correction functions.
 //
 // Includes equivalent_polynomials.h and UnfittedKernels.h; uses no pyarray or ADR type, plain pointers and sizes.
 #include <algorithm>
@@ -20,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 #include "index_type.h"
 #include "equivalent_polynomials.h"
@@ -1637,6 +1640,292 @@ namespace proteus
         }
         else
           branches = 0;
+      }
+    };
+
+    // ---- Stokes: the stabilized P1-P1 immersed element ------------------------------------------------------------
+    // Immersed finite element (IFE) basis for 2D Stokes interface problems: the stabilized P1-P1 pair.
+    //
+    // A triangle cut by a straight interface Gamma = {phi = 0} carries, on each side, linear u, v and p. The two sides
+    // are glued by the interface conditions, so that the element has the same 9 nodal unknowns (u, v, p at the
+    // vertices) as a standard P1-P1 element:
+    //
+    //   side A = {phi < 0}, viscosity mu_a;  side B = {phi > 0}, viscosity mu_b;  n = grad(phi)/|grad(phi)|, from A into B;
+    //   [q] = q_B - q_A;  sigma = -p I + mu (grad u + grad u^T).
+    //
+    //   conditions                                       rows  data item
+    //   nodal values u, v, p at each vertex, read from     9   U_j, V_j, P_j
+    //     the side that owns the vertex
+    //   [u] = J at the two end points of Gamma             4   J_u, J_v
+    //   [sigma n] = j_t at the midpoint of Gamma           2   jt_x, jt_y
+    //   [div u] = 0                                        1   -
+    //   [grad p] = 0                                       2   -
+    //                                                     18 = 2 sides x 3 fields x 3 coefficients
+    //
+    // Solving A c = B d for every data item d gives one column per item: the 9 nodal columns are the shape functions,
+    // the 4 interface columns are the correction functions that carry a velocity jump or an interface force.
+    // Incompressibility is not imposed per side: it comes from the global weak form, which also needs a pressure
+    // stabilization for P1-P1. That term does not enter the basis.
+    //
+    // The construction follows the notebook IFEM_2D_Stokes.ipynb (reference triangle) but is written directly on the
+    // physical triangle, so no element map is needed. Each side's polynomial is stored in scaled local coordinates
+    // ((x - x_c)/h, (y - y_c)/h) about the centroid, which keeps the system well scaled for any element size.
+    //
+    // Tested on its own in test/unfitted/ (test_unfitted_stokes.py).
+    class StokesIFEP1
+    {
+    public:
+      static constexpr int nNodal = 9;   // u, v, p at the 3 vertices
+      static constexpr int nData = 13;   // nodal values + velocity jump (2) + traction jump (2)
+      enum Field { U = 0, V = 1, P = 2 };
+      enum Side { A = 0, B = 1 };
+      // column of a data item: nodal(f, j) for field f at vertex j; then the interface data
+      static constexpr int nodal(int f, int j) { return 3 * f + j; }
+      static constexpr int Ju = 9, Jv = 10, JTx = 11, JTy = 12;
+
+      // x: the vertices; phi: the level set at the vertices; mua, mub: the viscosities of sides A and B.
+      // An element that Gamma only touches (no sign change of phi) gets the standard P1-P1 basis.
+      void build(const double x[3][2], const double phi[3], const double mua, const double mub)
+      {
+        setFrame(x);
+        for (int j = 0; j < 3; j++)
+          phi_[j] = phi[j];
+        const double pmin = std::fmin(phi[0], std::fmin(phi[1], phi[2]));
+        const double pmax = std::fmax(phi[0], std::fmax(phi[1], phi[2]));
+        cut_ = pmin < 0.0 && pmax > 0.0;
+        if (cut_)
+          buildCut(x, mua, mub);
+        else
+          buildStandard(x);
+      }
+
+      bool isCut() const { return cut_; }
+      // the side a point lies on, from the linear interpolant of phi (points on Gamma count as side B)
+      int sideOf(const double pt[2]) const { return phiAt(pt) < 0.0 ? A : B; }
+      // the side that owns vertex j (it supplies the vertex's nodal values)
+      int owner(const int j) const { return phi_[j] < 0.0 ? A : B; }
+
+      // field f of data column j, on side s, at point pt
+      double value(const int j, const int s, const int f, const double pt[2]) const
+      {
+        const double *c = coef_[j][s][f].data();
+        return c[0] + c[1] * (pt[0] - xc_[0]) / h_ + c[2] * (pt[1] - xc_[1]) / h_;
+      }
+      // gradient of field f of data column j on side s (constant on each side)
+      void gradient(const int j, const int s, const int f, double g[2]) const
+      {
+        g[0] = coef_[j][s][f][1] / h_;
+        g[1] = coef_[j][s][f][2] / h_;
+      }
+
+      // the cut: end points of Gamma, its midpoint, its length and the unit normal from A into B
+      const double *gammaEnd(const int e) const { return end_[e].data(); }
+      const double *gammaMid() const { return mid_.data(); }
+      double gammaLength() const { return std::hypot(end_[1][0] - end_[0][0], end_[1][1] - end_[0][1]); }
+      const double *normal() const { return n_.data(); }
+
+    private:
+      static constexpr int nUnknowns = 18;
+      // unknown index of coefficient k of field f on side s
+      static constexpr int idx(int s, int f, int k) { return (3 * s + f) * 3 + k; }
+
+      bool cut_ = false;
+      double phi_[3] = {0., 0., 0.};
+      double xc_[2] = {0., 0.}, h_ = 1.0;
+      std::array<double, 2> end_[2] = {}, mid_ = {}, n_ = {};
+      std::array<double, 3> coef_[nData][2][3] = {};   // [column][side][field] -> coefficients of 1, (x-xc)/h, (y-yc)/h
+
+      double phiAt(const double pt[2]) const
+      {
+        // phi is linear: phi(pt) = phi_c + grad(phi).(pt - x_c), with phi_c the mean of the vertex values
+        return (phi_[0] + phi_[1] + phi_[2]) / 3.0 + gradPhi_[0] * (pt[0] - xc_[0]) + gradPhi_[1] * (pt[1] - xc_[1]);
+      }
+      double gradPhi_[2] = {0., 0.};
+
+      // the three local monomials 1, (x-xc)/h, (y-yc)/h at a point
+      void monomials(const double pt[2], double m[3]) const
+      {
+        m[0] = 1.0;
+        m[1] = (pt[0] - xc_[0]) / h_;
+        m[2] = (pt[1] - xc_[1]) / h_;
+      }
+
+      void setFrame(const double x[3][2])
+      {
+        xc_[0] = (x[0][0] + x[1][0] + x[2][0]) / 3.0;
+        xc_[1] = (x[0][1] + x[1][1] + x[2][1]) / 3.0;
+        h_ = 0.0;
+        for (int j = 0; j < 3; j++)
+          h_ = std::fmax(h_, std::hypot(x[(j + 1) % 3][0] - x[j][0], x[(j + 1) % 3][1] - x[j][1]));
+      }
+
+      // coefficients of the P1 hat of each vertex: hat[j][k] with hat_j = sum_k hat[j][k] m_k
+      void hats(const double x[3][2], double hat[3][3]) const
+      {
+        double M[3][3], I[3][3] = {{1., 0., 0.}, {0., 1., 0.}, {0., 0., 1.}};
+        for (int i = 0; i < 3; i++)
+          monomials(x[i], M[i]);   // M[i][k] = m_k(x_i), so hat coefficients = columns of M^-1
+        double X[3][3];
+        solve<3, 3>(M, I, X);
+        for (int j = 0; j < 3; j++)
+          for (int k = 0; k < 3; k++)
+            hat[j][k] = X[k][j];
+      }
+
+      void buildStandard(const double x[3][2])
+      {
+        double hat[3][3];
+        hats(x, hat);
+        for (auto &col : coef_)
+          for (auto &side : col)
+            for (auto &f : side)
+              f = {0., 0., 0.};
+        for (int f = 0; f < 3; f++)
+          for (int j = 0; j < 3; j++)
+            for (int s = 0; s < 2; s++)
+              for (int k = 0; k < 3; k++)
+                coef_[nodal(f, j)][s][f][k] = hat[j][k];
+        gradPhi_[0] = gradPhi_[1] = 0.0;
+      }
+
+      void buildCut(const double x[3][2], const double mua, const double mub)
+      {
+        // geometry: grad(phi), the unit normal, the two end points of Gamma and its midpoint
+        double hat[3][3];
+        hats(x, hat);
+        gradPhi_[0] = gradPhi_[1] = 0.0;
+        for (int j = 0; j < 3; j++)
+        {
+          gradPhi_[0] += phi_[j] * hat[j][1] / h_;
+          gradPhi_[1] += phi_[j] * hat[j][2] / h_;
+        }
+        const double gnorm = std::hypot(gradPhi_[0], gradPhi_[1]);
+        n_ = {gradPhi_[0] / gnorm, gradPhi_[1] / gnorm};
+        int nEnds = 0;
+        for (int j = 0; j < 3 && nEnds < 2; j++)
+        {
+          const int k = (j + 1) % 3;
+          if (phi_[j] == 0.0)   // Gamma through vertex j
+            end_[nEnds++] = {x[j][0], x[j][1]};
+          else if (phi_[j] * phi_[k] < 0.0)   // Gamma crosses edge (j, k)
+          {
+            const double t = phi_[j] / (phi_[j] - phi_[k]);
+            end_[nEnds++] = {x[j][0] + t * (x[k][0] - x[j][0]), x[j][1] + t * (x[k][1] - x[j][1])};
+          }
+        }
+        if (nEnds != 2)
+          throw std::runtime_error("StokesIFEP1: a cut element must give two end points of Gamma");
+        mid_ = {0.5 * (end_[0][0] + end_[1][0]), 0.5 * (end_[0][1] + end_[1][1])};
+
+        // the system A c = B d, one row per condition
+        double Amat[nUnknowns][nUnknowns] = {}, Bmat[nUnknowns][nData] = {};
+        int r = 0;
+        double m[3];
+        const double mu[2] = {mua, mub}, sgn[2] = {-1.0, 1.0};   // [q] = q_B - q_A
+
+        // 1. nodal values, from the owning side
+        for (int f = 0; f < 3; f++)
+          for (int j = 0; j < 3; j++, r++)
+          {
+            monomials(x[j], m);
+            for (int k = 0; k < 3; k++)
+              Amat[r][idx(owner(j), f, k)] = m[k];
+            Bmat[r][nodal(f, j)] = 1.0;
+          }
+        // 2. [u] = J at the two end points of Gamma
+        for (int e = 0; e < 2; e++)
+          for (int f = U; f <= V; f++, r++)
+          {
+            monomials(end_[e].data(), m);
+            for (int s = 0; s < 2; s++)
+              for (int k = 0; k < 3; k++)
+                Amat[r][idx(s, f, k)] = sgn[s] * m[k];
+            Bmat[r][f == U ? Ju : Jv] = 1.0;
+          }
+        // 3. [sigma n] = j_t at the midpoint: sigma_c n = -p n_c + mu sum_d (du_c/dx_d + du_d/dx_c) n_d
+        monomials(mid_.data(), m);
+        for (int c = 0; c < 2; c++, r++)
+        {
+          for (int s = 0; s < 2; s++)
+          {
+            for (int k = 0; k < 3; k++)
+              Amat[r][idx(s, P, k)] += -sgn[s] * n_[c] * m[k];
+            for (int d = 0; d < 2; d++)   // du_c/dx_d is coefficient d+1 of field c, over h
+            {
+              Amat[r][idx(s, c, d + 1)] += sgn[s] * mu[s] * n_[d] / h_;
+              Amat[r][idx(s, d, c + 1)] += sgn[s] * mu[s] * n_[d] / h_;
+            }
+          }
+          Bmat[r][c == 0 ? JTx : JTy] = 1.0;
+        }
+        // 4. [div u] = 0
+        for (int s = 0; s < 2; s++)
+        {
+          Amat[r][idx(s, U, 1)] = sgn[s] / h_;
+          Amat[r][idx(s, V, 2)] = sgn[s] / h_;
+        }
+        r++;
+        // 5. [grad p] = 0
+        for (int d = 0; d < 2; d++, r++)
+          for (int s = 0; s < 2; s++)
+            Amat[r][idx(s, P, d + 1)] = sgn[s] / h_;
+
+        // scale every row to unit max-norm (the rows carry different units: 1, mu/h, 1/h), then solve
+        for (int i = 0; i < nUnknowns; i++)
+        {
+          double big = 0.0;
+          for (int j = 0; j < nUnknowns; j++)
+            big = std::fmax(big, std::fabs(Amat[i][j]));
+          for (int j = 0; j < nUnknowns; j++)
+            Amat[i][j] /= big;
+          for (int j = 0; j < nData; j++)
+            Bmat[i][j] /= big;
+        }
+        double C[nUnknowns][nData];
+        solve<nUnknowns, nData>(Amat, Bmat, C);
+        for (int j = 0; j < nData; j++)
+          for (int s = 0; s < 2; s++)
+            for (int f = 0; f < 3; f++)
+              for (int k = 0; k < 3; k++)
+                coef_[j][s][f][k] = C[idx(s, f, k)][j];
+      }
+
+      // X = A^-1 B by Gaussian elimination with partial pivoting (A and B are overwritten)
+      template <int n, int nrhs>
+      static void solve(double A[n][n], double B[n][nrhs], double X[n][nrhs])
+      {
+        for (int col = 0; col < n; col++)
+        {
+          int piv = col;
+          for (int i = col + 1; i < n; i++)
+            if (std::fabs(A[i][col]) > std::fabs(A[piv][col]))
+              piv = i;
+          if (!(std::fabs(A[piv][col]) > 1e-13))
+            throw std::runtime_error("StokesIFEP1: the cut-cell system is singular");
+          if (piv != col)
+          {
+            for (int j = 0; j < n; j++)
+              std::swap(A[col][j], A[piv][j]);
+            for (int j = 0; j < nrhs; j++)
+              std::swap(B[col][j], B[piv][j]);
+          }
+          for (int i = col + 1; i < n; i++)
+          {
+            const double f = A[i][col] / A[col][col];
+            for (int j = col; j < n; j++)
+              A[i][j] -= f * A[col][j];
+            for (int j = 0; j < nrhs; j++)
+              B[i][j] -= f * B[col][j];
+          }
+        }
+        for (int i = n - 1; i >= 0; i--)
+          for (int j = 0; j < nrhs; j++)
+          {
+            double s = B[i][j];
+            for (int k = i + 1; k < n; k++)
+              s -= A[i][k] * X[k][j];
+            X[i][j] = s / A[i][i];
+          }
       }
     };
   } // namespace unfitted

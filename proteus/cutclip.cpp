@@ -1,5 +1,7 @@
 // Python binding for proteus/cutclip.h (C44): exact planar clipping of tetrahedra and triangles and their moments.
-// Used as the oracle in test/ADR3D and by the fit-versus-clip checks; not called from the ADR kernel.
+// Used as the oracle in test/ADR3D and by the fit-versus-clip checks; not called from the ADR kernel. Also the test
+// binding of the immersed bases in Unfitted.h: the scalar IFE (ifem_basis_2d/3d) and the Stokes P1-P1 element
+// (stokes_ife_p1, tested in test/IFEM/test_stokes_ife_p1.py).
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <pybind11/stl.h>
@@ -132,6 +134,74 @@ static py::dict ifemBasis(const Arr &nodes, const Arr &phi, const Arr &pts, doub
   return out;
 }
 
+// The stabilized P1-P1 Stokes immersed element (Unfitted.h StokesIFEP1) on a physical triangle. Every data column j
+// (9 shape functions, then the correction functions J_u, J_v, jt_x, jt_y) on both sides, at the points pts:
+// values[j, side, field, q] (field 0, 1, 2 = u, v, p; side 0 = A = {phi < 0}, 1 = B) and the constant gradients
+// gradients[j, side, field, :]; plus the side of each point, the owner of each vertex and the cut itself.
+static py::dict stokesIFEP1(const Arr &nodes, const Arr &phi, double mua, double mub, const Arr &pts)
+{
+  using IFE = proteus::unfitted::StokesIFEP1;
+  if (nodes.ndim() != 2 || nodes.shape(0) != 3 || nodes.shape(1) != 2)
+    throw std::invalid_argument("nodes must be (3, 2)");
+  if (phi.ndim() != 1 || phi.shape(0) != 3)
+    throw std::invalid_argument("phi must be (3,)");
+  if (pts.ndim() != 2 || pts.shape(1) != 2)
+    throw std::invalid_argument("pts must be (m, 2)");
+  double x[3][2], ph[3];
+  for (int i = 0; i < 3; ++i)
+  {
+    ph[i] = phi.at(i);
+    x[i][0] = nodes.at(i, 0);
+    x[i][1] = nodes.at(i, 1);
+  }
+  IFE b;
+  b.build(x, ph, mua, mub);
+  const int m = (int)pts.shape(0);
+  py::array_t<double> values({IFE::nData, 2, 3, m}), gradients({IFE::nData, 2, 3, 2});
+  py::array_t<int> side({m}), owner({3});
+  for (int q = 0; q < m; ++q)
+  {
+    const double pt[2] = {pts.at(q, 0), pts.at(q, 1)};
+    side.mutable_at(q) = b.sideOf(pt);
+    for (int j = 0; j < IFE::nData; ++j)
+      for (int s = 0; s < 2; ++s)
+        for (int f = 0; f < 3; ++f)
+          values.mutable_at(j, s, f, q) = b.value(j, s, f, pt);
+  }
+  for (int j = 0; j < IFE::nData; ++j)
+    for (int s = 0; s < 2; ++s)
+      for (int f = 0; f < 3; ++f)
+      {
+        double g[2];
+        b.gradient(j, s, f, g);
+        gradients.mutable_at(j, s, f, 0) = g[0];
+        gradients.mutable_at(j, s, f, 1) = g[1];
+      }
+  for (int i = 0; i < 3; ++i)
+    owner.mutable_at(i) = b.owner(i);
+  py::dict out;
+  out["cut"] = b.isCut();
+  out["values"] = values;
+  out["gradients"] = gradients;
+  out["side"] = side;
+  out["owner"] = owner;
+  if (b.isCut())
+  {
+    py::array_t<double> ends({2, 2}), mid({2}), normal({2});
+    for (int c = 0; c < 2; ++c)
+    {
+      ends.mutable_at(0, c) = b.gammaEnd(0)[c];
+      ends.mutable_at(1, c) = b.gammaEnd(1)[c];
+      mid.mutable_at(c) = b.gammaMid()[c];
+      normal.mutable_at(c) = b.normal()[c];
+    }
+    out["gamma"] = ends;
+    out["mid"] = mid;
+    out["normal"] = normal;
+  }
+  return out;
+}
+
 PYBIND11_MODULE(cutclip, m)
 {
   m.doc() = "Exact planar clipping of a tetrahedron/triangle and its polynomial moments (C44 oracle)";
@@ -158,4 +228,6 @@ PYBIND11_MODULE(cutclip, m)
   m.def("ifem_basis_2d", &ifemBasis<2>, py::arg("nodes"), py::arg("phi"), py::arg("pts"), py::arg("ma"), py::arg("mb"));
   m.def("ifem_basis_3d", &ifemBasis<3>, py::arg("nodes"), py::arg("phi"), py::arg("pts"), py::arg("ma"), py::arg("mb"));
   m.def("monomials", [](int degree) { return monomialIndex(degree); });
+  m.def("stokes_ife_p1", &stokesIFEP1, py::arg("nodes"), py::arg("phi"), py::arg("mua"), py::arg("mub"),
+        py::arg("pts"));
 }
